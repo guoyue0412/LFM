@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,19 +33,6 @@ class SimPaths:
             ("qbr_file_folder", self.qbr_file_folder),
         ]:
             os.makedirs(folder, exist_ok=True)
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, str]) -> "SimPaths":
-        """从旧版 file_path 字典构造 (向后兼容)。"""
-        key_map = {
-            "dll_file": "dll_file",
-            "base_sim": "base_sim",
-            "sim_folder": "SIM_folder",
-            "bld_file_path": "bld_file_path",
-            "qbr_file_folder": "QBR_file_folder",
-            "simulation_parameter_path": "simulation_parameter_path",
-        }
-        return cls(**{new: d[old] for new, old in key_map.items()})
 
 
 @dataclass
@@ -77,6 +64,7 @@ class SimConfig:
     omp_threads: int = 4
     air_density: float = 1.225
     propeller_radius: float = 0.127
+    group_size: int = 32
 
     @property
     def device_id(self) -> int:
@@ -86,11 +74,7 @@ class SimConfig:
     def record_start(self) -> int:
         return self.num_timesteps - self.warmup_steps
 
-    # QBlade createInstance 的 groupSize 参数
-    group_size: int = 32
 
-
-# .sim 模板中需要保留的文件 (不删除)
 SIM_TEMPLATE_FILES = frozenset({
     "Baseline_Simulation.sim",
     "Baseline_Blade_Turb",
@@ -98,7 +82,6 @@ SIM_TEMPLATE_FILES = frozenset({
     "Base_simulation.sim",
 })
 
-# QBlade 结果列名
 QBLADE_DATA_KEYS = (
     "Time [s]",
     "Aerodynamic Thrust [N]",
@@ -114,11 +97,11 @@ RESULT_COLUMNS = ("Time", "Thrust", "Power", "Torque", "Thrust_y", "Thrust_z")
 def load_conditions_from_excel(path: str) -> List[SimCondition]:
     """从 Excel 文件加载仿真工况列表。"""
     df = pd.read_excel(path)
-    conditions = []
-    for _, row in df.iterrows():
-        conditions.append(SimCondition(
+    return [
+        SimCondition(
             rpm=float(row["RPM"]),
             wind_speed=float(row["windSpeed"]),
             angle=float(row["windAngle"]),
-        ))
-    return conditions
+        )
+        for _, row in df.iterrows()
+    ]

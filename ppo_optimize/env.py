@@ -13,8 +13,8 @@ v4 关键改进 (硬约束模式):
 """
 
 import math
-import sys
 import os
+import sys
 
 import gymnasium as gym
 import numpy as np
@@ -22,7 +22,9 @@ import pandas as pd
 from gymnasium import spaces
 from scipy.interpolate import BSpline
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from config import Config
 from quadcopter_trim_solver import (

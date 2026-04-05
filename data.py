@@ -1,12 +1,10 @@
 """螺旋桨气动力预测模型 — 数据处理
 
-支持两种数据源:
-  1. 原始 pkl 文件（递归扫描 data*.pkl 和 sample_*.pkl）
-  2. 已有 dealed_data.xlsx（旧流程兼容）
+数据源: 原始 pkl 文件（递归扫描 data*.pkl 和 sample_*.pkl）
 
 几何模式:
   "none"           → 仅工况 (RPM, WIND, ANGLE)
-  "control_points" → 工况 + 8个控制点
+  "control_points" → 工况 + 8 个控制点
   "sections"       → 工况 + 22 chord + 22 twist
 """
 
@@ -257,61 +255,14 @@ def load_raw_pkl(data_dir: str, cfg: Config) -> pd.DataFrame:
     return df_all
 
 
-def load_from_excel(excel_path: str, cfg: Config) -> pd.DataFrame:
-    """从已有的 dealed_data.xlsx 加载（旧流程兼容）。
-
-    Excel 中的几何列约定:
-      - control_points 模式: cp_0 ~ cp_7
-      - sections 模式: chord_0 ~ chord_21, twist_0 ~ twist_21
-    """
-    df = pd.read_excel(excel_path)
-
-    required = cfg.condition_columns + cfg.output_columns
-    if cfg.geometry_mode != "none":
-        required += cfg.geometry_columns
-
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"Excel 缺少列: {missing}")
-
-    print(f"从 Excel 加载了 {len(df)} 条数据 (几何模式: {cfg.geometry_mode})")
-    return df[required]
-
-
 # ================================================================
 #  数据处理 & 保存
 # ================================================================
 
 def process_and_save(cfg: Config, raw_df: pd.DataFrame = None) -> None:
-    """切分 → 标准化 → 保存 pickle + scaler。
-
-    数据源优先级: pkl 原始数据 > Excel
-    pkl 数据文件约定: 文件名以 "data" 或 "sample_" 开头且后缀为 .pkl（递归扫描子目录）
-    """
+    """切分 → 标准化 → 保存 pickle + scaler。"""
     if raw_df is None:
-        has_pkl = False
-        for root, _, files in os.walk(cfg.raw_data_dir):
-            for f in files:
-                if not f.endswith(".pkl"):
-                    continue
-                fl = f.lower()
-                if fl.startswith("data") or fl.startswith("sample_"):
-                    has_pkl = True
-                    break
-            if has_pkl:
-                break
-
-        if has_pkl:
-            raw_df = load_raw_pkl(cfg.raw_data_dir, cfg)
-        else:
-            excel_path = os.path.join(cfg.processed_data_dir, "dealed_data.xlsx")
-            if os.path.exists(excel_path):
-                raw_df = load_from_excel(excel_path, cfg)
-            else:
-                raise FileNotFoundError(
-                    f"未找到数据源: {cfg.raw_data_dir} 中无 data*.pkl / sample_*.pkl，"
-                    f"{cfg.processed_data_dir} 中无 dealed_data.xlsx"
-                )
+        raw_df = load_raw_pkl(cfg.raw_data_dir, cfg)
 
     d = cfg.processed_data_dir
 

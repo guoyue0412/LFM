@@ -71,8 +71,9 @@ LFM/
 │   │   ├── sim_file.py           #     .sim 模板读写
 │   │   ├── geometry.py           #     B-spline + .bld 修改
 │   │   ├── runner.py             #     QBladeRunner (context-manager)
-│   │   ├── batch.py              #     并行批量调度器 (GPU/CPU/Hybrid)
-│   │   └── simulation.py         #     向后兼容 SIMULATION 封装
+│   │   └── batch.py              #     并行批量调度器 (GPU/CPU/Hybrid)
+│   ├── get_data.py               #   几何级并行数据采集 (CLI)
+│   ├── project_config.py         #   仿真路径 & 基线几何
 │   ├── Qblade_data/              #   .sim/.bld/.afl/.plr 模板
 │   └── QBladeCE_2.0.9.2/         #   QBlade SIL 接口 & DLL
 │

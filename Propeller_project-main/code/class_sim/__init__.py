@@ -6,7 +6,6 @@
     geometry    : B-spline 插值 + .bld 文件修改
     runner      : 单次仿真执行器 (QBladeRunner, context-manager)
     batch       : 并行批量调度器 (GPU / CPU / Hybrid)
-    simulation  : 向后兼容的 SIMULATION 类 (薄封装)
 """
 
 from .config import SimCondition, SimConfig, SimPaths, load_conditions_from_excel

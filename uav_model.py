@@ -354,13 +354,8 @@ def plot_aero_characteristics(cfg: QuadcopterConfig = None,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    try:
-        from plot_style import apply_style, COLORS, savefig, make_fig, label_subplots
-        apply_style()
-    except ImportError:
-        COLORS = {"primary": "#2563EB", "secondary": "#DC2626",
-                  "accent1": "#059669", "accent2": "#D97706"}
-        savefig = None
+    from plot_style import apply_style, COLORS, savefig, make_fig, label_subplots
+    apply_style()
 
     if cfg is None:
         cfg = QuadcopterConfig()
