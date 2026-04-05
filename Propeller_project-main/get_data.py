@@ -40,6 +40,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    stream=sys.stdout,
 )
 log = logging.getLogger(__name__)
 
@@ -184,7 +185,9 @@ def _run_one_geometry(
             lib.setOmpNumThreads(omp_threads)
 
         sim_basename = os.path.basename(sim_path)
+        print(f"[geo_{geometry_idx}] loadSimDefinition: {sim_basename}", flush=True)
         lib.loadSimDefinition(ctypes.create_string_buffer(sim_basename.encode("utf-8")))
+        print(f"[geo_{geometry_idx}] initializeSimulation...", flush=True)
         lib.initializeSimulation()
 
         warmup = max(0, num_timesteps - 600)
@@ -199,12 +202,24 @@ def _run_one_geometry(
         col_names = ["Time", "Thrust", "Power", "Torque", "Thrust_y", "Thrust_z"]
         buf = {k: [] for k in col_names}
 
+        print_every = max(1, num_timesteps // 10)
+        t_sim_start = time.perf_counter()
         for step in range(num_timesteps):
             lib.advanceTurbineSimulation()
             if step >= warmup:
                 for col, qkey in zip(col_names, data_keys):
                     buf[col].append(float(lib.getCustomData_at_num(qkey, 0, 0)))
+            if (step + 1) % print_every == 0:
+                pct = (step + 1) / num_timesteps * 100
+                elapsed = time.perf_counter() - t_sim_start
+                eta_s = elapsed / (step + 1) * (num_timesteps - step - 1)
+                print(
+                    f"[geo_{geometry_idx}] step {step+1}/{num_timesteps} "
+                    f"({pct:.0f}%) elapsed={elapsed:.0f}s ETA={eta_s:.0f}s",
+                    flush=True,
+                )
 
+        print(f"[geo_{geometry_idx}] simulation done, unloading DLL...", flush=True)
         lib.unload()
 
         df = pd.DataFrame(buf)
