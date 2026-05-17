@@ -57,6 +57,13 @@ data_for_train/**/scaler_*.pkl
 # ─── 模型权重 (按需手动添加) ───
 trained_models/*.pth
 trained_models/*.pt
+optimization_v2/models/*.pth
+optimization_v2/models/*.pt
+
+# ─── V2 管线产物 (合成数据 / 训练历史 / 主动学习查询) ───
+optimization_v2/data/synthetic_aero_data.csv
+optimization_v2/data/active_learning_queries.csv
+optimization_v2/models/train_history.json
 
 # ─── CMA-ES 中间输出 ───
 outcmaes/
