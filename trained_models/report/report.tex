@@ -1,0 +1,17 @@
+\begin{table}[htbp]
+  \centering
+  \caption{DNN model prediction accuracy on test set}
+  \label{tab:dnn_accuracy}
+  \begin{tabular}{lcccccc}
+    \toprule
+    Output & MSE & RMSE & MAE & $R^2$ & MAPE(\%) & MaxErr \\
+    \midrule
+    Fx & 0.001688 & 0.041087 & 0.030119 & 0.9983 & 11.67 & 0.2009 \\
+    Fy & 0.042830 & 0.206954 & 0.148428 & 0.9540 & 99.41 & 1.3601 \\
+    Fz & 0.002568 & 0.050674 & 0.038074 & 0.9975 & 21.30 & 0.2533 \\
+    Torque & 0.001454 & 0.038130 & 0.028425 & 0.9985 & 36.61 & 0.1663 \\
+    \midrule
+    Overall & 0.012135 & 0.110159 & 0.061261 & 0.9871 & -- & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}

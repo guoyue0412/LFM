@@ -1,0 +1,90 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── 虚拟环境 ───
+.env
+.venv
+env/
+venv/
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ─── OS ───
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ─── Jupyter ───
+.ipynb_checkpoints/
+
+# ─── TensorBoard ───
+runs/
+
+# ─── 大 JSON / PPO 训练历史 ───
+ppo_models*/training_history.json
+ppo_models*/logs/
+
+# ─── QBlade 二进制 & DLL (许可证限制, 大文件) ───
+*.dll
+*.so
+*.dylib
+*.exe
+*.zip
+*.bts
+Propeller_project-main/QBladeCE_*/Binaries/
+Propeller_project-main/UAV_urban_pro.txt
+
+# ─── 大数据文件 (不入库, 见 data_for_train/) ───
+*.pkl
+*.pickle
+data_for_train/data/
+data_for_train/**/X_*.pkl
+data_for_train/**/y_*.pkl
+data_for_train/**/scaler_*.pkl
+
+# ─── 模型权重 (按需手动添加) ───
+trained_models/*.pth
+trained_models/*.pt
+optimization_v2/models/*.pth
+optimization_v2/models/*.pt
+
+# ─── V2 管线产物 (合成数据 / 训练历史 / 主动学习查询) ───
+optimization_v2/data/synthetic_aero_data.csv
+optimization_v2/data/active_learning_queries.csv
+optimization_v2/models/train_history.json
+
+# ─── CMA-ES 中间输出 ───
+outcmaes/
+
+# ─── 超参扫描大文件 ───
+sweep_results/*_detail.json
+sweep_results/*_curves.npz
+
+# ─── 仿真产物 ───
+simulation_data/
+*.qpr
+*.qbr
+propeller_simulation_data_for_one.pkl
+geometry_simulation_dict.pkl
+
+# ─── 临时文件 ───
+*.tmp
+*.bak
+*.log
+
+# ─── agent transcripts (Cursor 内部) ───
+agent-transcripts/
+terminals/
+mcps/
