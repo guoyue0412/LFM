@@ -84,6 +84,9 @@ geometry_simulation_dict.pkl
 *.bak
 *.log
 
+# ─── 已归档的 Windows 版 Propeller_project（接入 Linux submodule 后保留作离线回滚源） ───
+Propeller_project-main.win.bak/
+
 # ─── agent transcripts (Cursor 内部) ───
 agent-transcripts/
 terminals/
