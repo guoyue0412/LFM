@@ -114,6 +114,18 @@ else
 fi
 
 # ── 4. ctypes dry-load .so ─────────────────────────────────────────────
+# QBladeCE/Libraries 提供 fortran/openCL/QGLViewer 等；conda env lib 提供 Qt5
+QBLADE_LIB_DIR="$ROOT/$SUB/QBladeCE_2.0.8.6/Libraries"
+_CONDA_LIB=""
+if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    _CONDA_LIB="${CONDA_PREFIX}/lib"
+else
+    # --skip-conda 时 _PYTHON 指向 envs/LFM/bin/python，向上推 lib 目录
+    _CONDA_LIB="$(dirname "$(dirname "$_PYTHON")")/lib"
+fi
+export LD_LIBRARY_PATH="$QBLADE_LIB_DIR:$_CONDA_LIB:${LD_LIBRARY_PATH:-}"
+echo "▸ LD_LIBRARY_PATH 已注入：$QBLADE_LIB_DIR + $_CONDA_LIB"
+
 $_PYTHON - "$SO_PATH" <<'PY'
 import ctypes, sys
 so = sys.argv[1]
