@@ -81,12 +81,14 @@ echo "▸ 子模块分支：$SUB_BRANCH ($(git -C "$SUB" rev-parse --short HEAD)
 # 从子模块 config.py 读 QBlade_dll（变量名虽为 dll，实际指向 .so）
 SO_REL="$($_PYTHON - "$SUB/code/Simulation_QBlade" <<'PY'
 import os, runpy, sys
-cfg_dir = sys.argv[1]
+# 必须先转为绝对路径，chdir 之后 sys.argv[1] 的相对路径含义会变
+cfg_dir = os.path.abspath(sys.argv[1])
 os.chdir(cfg_dir)
 sys.path.insert(0, cfg_dir)
 cfg = runpy.run_module("config", run_name="__cfg__")
-# config 用 os.getcwd() 解析路径，相对当前 cwd 给出绝对路径
-print(os.path.relpath(cfg["QBlade_dll"], start=os.path.abspath(os.path.join(cfg_dir, "../.."))))
+# config 用 os.getcwd() 解析路径，返回绝对路径；submodule 根 = cfg_dir/../../
+sub_root = os.path.abspath(os.path.join(cfg_dir, "../.."))
+print(os.path.relpath(cfg["QBlade_dll"], start=sub_root))
 PY
 )"
 SO_PATH="$SUB/$SO_REL"
