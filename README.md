@@ -112,6 +112,21 @@ pip install -r requirements.txt
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 
+### Linux 部署（含 QBlade 子模块）
+
+`Propeller_project-main/` 是 git submodule，指向 `guoyue0412/Propeller_project_linux_version.git` 的 `guoyue0412-Linux_version` 分支，含 18MB 的 `libQBladeCE_2.0.8.6.so.1.0.0` Linux 共享库。Mac 上仅做开发与 git 推送，仿真数据生成在远端 Linux 节点（如 `3090_node1`）跑：
+
+```bash
+# 在 Linux 节点上：
+git clone --recursive git@github.com:guoyue0412/LFM.git
+cd LFM
+bash scripts/install_linux.sh         # 校验 submodule + .so + ldd 系统依赖 + 建 LFM conda env
+bash scripts/smoke_test.sh            # 1 几何 × 全工况 → data.py → 校验 raw_data.csv
+bash scripts/run_data_gen.sh --help   # 完整数据生成 CLI
+```
+
+已有本地 clone 想拉取 submodule：`git submodule update --init --recursive`
+
 ### 最简三步 (DNN 训练)
 
 ```bash
@@ -133,25 +148,24 @@ python ppo_optimize/train_ppo.py --total-timesteps 200000 --n-envs 4 --constrain
 python ppo_optimize/eval_ppo.py
 ```
 
-### QBlade 并行批量仿真
+### QBlade 数据生成（Linux）
 
-```python
-from Propeller_project_main.code.class_sim import (
-    SimPaths, SimConfig, BatchRunner, load_conditions_from_excel
-)
+通过 `scripts/run_data_gen.py` 包装子模块的 `SIMULATION` 类，输出对齐 `data.py` 期待的 `{geometry_idx: {"geometry": ..., "RPM*_Wind*_Angle*": DataFrame, ...}}` 格式 pkl，直接落到 `data_for_train/data/`：
 
-paths = SimPaths(dll_file="path/to/QBladeCE.dll", base_sim="...", ...)
-config = SimConfig(device="CPU", num_timesteps=1800)
-conditions = load_conditions_from_excel("conditions.xlsx")
+```bash
+# 仅 baseline 几何 × 全工况（冒烟）
+bash scripts/run_data_gen.sh --device CPU --tag smoke
 
-# CPU 4 进程并行
-runner = BatchRunner(paths, config, max_workers=4, device_strategy="cpu")
-results = runner.run_batch(conditions, progress_callback=lambda d, t, r: print(f"{d}/{t}"))
+# 批量多几何（先把 (N, 22, 3) 几何打成 npy）
+bash scripts/run_data_gen.sh \
+    --geometry-npy ./geometries.npy \
+    --device CPU --num-timesteps 1000 --tag run_$(date +%Y%m%d)
 
-for r in results:
-    if r.ok:
-        print(f"{r.condition.name}: Thrust={r.data['THRUST'].iloc[0]:.2f} N")
+# 紧接着 data.py 即可消费
+python data.py
 ```
+
+工况组合（RPM × WIND × ANGLE）由子模块内 `code/Simulation_QBlade/simulation_parameters/Parameters.xlsx` 定义。
 
 ---
 

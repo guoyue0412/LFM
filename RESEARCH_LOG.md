@@ -287,7 +287,49 @@ for r in results:
 
 ---
 
-## 10. 后续计划
+## 10. Linux 部署管线接入 (2026-05-29)
+
+### 背景
+LFM 顶层（DNN 训练、PPO/CMA-ES 优化）跨平台无忧，但数据生成依赖 QBlade，仓库内原 `Propeller_project-main/` 目录是 Windows 版（`QBladeCE_2.0.9.2.dll` + `get_data.py` CLI），无法在 Linux 节点跑。本节记录从"嵌入 Windows 目录"到"指向独立 Linux submodule + LFM 顶层 wrapper"的改造。
+
+### 改动
+
+| 项 | 旧 | 新 |
+|----|----|----|
+| `Propeller_project-main/` | LFM 仓库内嵌入的 Windows 目录（79 文件） | git submodule，URL=`guoyue0412/Propeller_project_linux_version.git`，branch=`guoyue0412-Linux_version`，HEAD=`08ab7703` |
+| 数据生成入口 | `python Propeller_project-main/get_data.py --device CPU --workers 4` | `bash scripts/run_data_gen.sh --device CPU --tag <tag>` |
+| QBlade 共享库 | `QBladeCE_2.0.9.2/QBladeCE_2.0.9.2.dll`（Win PE32+） | `QBladeCE_2.0.8.6/libQBladeCE_2.0.8.6.so.1.0.0`（ELF x86-64, 18MB） |
+| 仿真接口 | 函数式 CLI + ProcessPoolExecutor | OOP `SIMULATION` 类（`run_one_simulation` / `run_all_simulation` / `change_propeller_geometry`） |
+| pkl 格式 | `sample_XXXX.pkl`（扁平） | `{geometry_idx: {"geometry": np.ndarray, "RPM*_Wind*_Angle*": DataFrame}}`（data.py 格式 B，已原生支持） |
+
+### Mac 端归档
+旧 Windows 版以 `git rm --cached -r Propeller_project-main` 从 index 移除，磁盘上改名为 `Propeller_project-main.win.bak/` 作离线回滚源，已加入 `.gitignore`。如需彻底清理：`rm -rf Propeller_project-main.win.bak`（验证 Linux 链路无误后再做）。
+
+### 新增脚本
+
+```
+scripts/
+├── install_linux.sh     # conda + pip + submodule + .so + ldd 一键校验
+├── run_data_gen.py      # chdir 到子模块 → import SIMULATION → 循环几何 → 聚合 → 落 pkl
+├── run_data_gen.sh      # bash 包装，自动激活 LFM env
+└── smoke_test.sh        # baseline 几何 × 全工况 → data.py → 校验 raw_data.csv
+```
+
+### 已知约束
+- `code/Simulation_QBlade/config.py` 用 `os.getcwd()` 解析路径，wrapper 必须先 `chdir` 再 import。
+- submodule 目录名含 `-`，不能作 Python 包；通过 `sys.path` 注入解决。
+- `ctypes.CDLL` 需要 `libgomp` / `libstdc++` / `libgfortran` 等系统库；`install_linux.sh` 用 `ldd` 校验，缺失时**仅提示**，不自动 `sudo apt`。
+- 子模块 clone 时默认 detached HEAD；`install_linux.sh` 会自动 `git checkout` 到分支以防意外丢提交。
+
+### 验证（在 3090_node1 上）
+1. `git clone --recursive ...`
+2. `bash scripts/install_linux.sh`
+3. `bash scripts/smoke_test.sh` → 应产出 `data_for_train/data/data_smoke_*.pkl` + `data_for_train/geometry_run_results_100/raw_data.csv`
+4. 训练链路依旧 `python data.py && python train.py`，无需改动。
+
+---
+
+## 11. 后续计划
 
 1. ~~等待 V4 硬约束优化收敛~~ ✓ CMA-ES FM=0.947 (PPO 仍在训练)
 2. **QBlade 验证**: 用 V4 最优几何在 QBlade 中仿真，验证 DNN 预测精度

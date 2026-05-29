@@ -62,11 +62,14 @@ python -m optimization_v2.run --excel data.xlsx --step train            # Excel 
 python -m optimization_v2.run --excel data.xlsx --sheet "sheet1"        # 指定工作表
 ```
 
-QBlade 数据采集(`Propeller_project-main/` 目录):
+QBlade 数据采集(Linux 节点,`Propeller_project-main/` 是 submodule):
 ```bash
-python Propeller_project-main/get_data.py --device CPU --workers 4
-python Propeller_project-main/get_data.py --device GPU            # 单进程 OpenCL
+bash scripts/install_linux.sh                    # 首次部署:校验 submodule + .so + 建 LFM env
+bash scripts/run_data_gen.sh --device CPU        # 默认 baseline 几何,全工况
+bash scripts/run_data_gen.sh --geometry-npy <(N,22,3).npy --device CPU --tag run1   # 批量多几何
+bash scripts/smoke_test.sh                       # 端到端冒烟(到 data.py 为止,不跑 train.py)
 ```
+**注**:旧 `Propeller_project-main/get_data.py` CLI 已随 Windows 版归档(`Propeller_project-main.win.bak/`),Linux 版用 OOP `SIMULATION` 类,wrapper 在 `scripts/run_data_gen.py`,见 RESEARCH_LOG §10。
 
 ## 高层架构
 
@@ -107,6 +110,10 @@ batch.py            train.py            cma_optimize.py      回验最优 CP
 - `train_ppo.py` 用 stable-baselines3 + `SubprocVecEnv`(`--n-envs N`)并行;每个子进程独立加载模型避免 GPU 争抢。
 
 ### QBlade 仿真管线(`Propeller_project-main/code/class_sim/`)
+
+⚠️ **2026-05-29 起 `Propeller_project-main/` 已切换为 Linux submodule**(`guoyue0412/Propeller_project_linux_version.git`),目录结构与本节描述的 Windows 重构版不同。Linux 版只暴露 `code/Simulation_QBlade/class_sim/simulation.py` 中的 OOP `SIMULATION` 类(`run_one_simulation` / `run_all_simulation` / `change_propeller_geometry`),输出 `geometry_simulation_dict.pkl` 兼容 `data.py` 格式 B。完整迁移说明见 RESEARCH_LOG §10,数据生成入口已迁移到 `scripts/run_data_gen.py`。
+
+以下 Windows 重构版架构留作历史参考(对应 `Propeller_project-main.win.bak/`):
 
 模块化重构后的架构(2026-03-28,见 RESEARCH_LOG §9):
 
