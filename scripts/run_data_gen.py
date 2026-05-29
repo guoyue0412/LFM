@@ -103,12 +103,14 @@ def main() -> int:
     print(f"▸ 几何数：{len(geometries)}，device={args.device}，"
           f"num_timesteps={args.num_timesteps or config_module.number_of_timesteps}")
 
-    aggregated: dict[int, dict] = {}
+    # key 使用 "geometry_<idx>" 字符串形式，匹配 LFM data.py 的 Format B 检测逻辑
+    # （data.py:206 用 k.startswith("geometry")，必须是 str）
+    aggregated: dict[str, dict] = {}
     t_start = time.time()
     for idx, geom in enumerate(geometries):
         t_geo = time.time()
         print(f"  [{idx + 1}/{len(geometries)}] 几何 #{idx} 开跑 ...")
-        aggregated[idx] = run_one_geometry(config_module, SIMULATION_cls, geom, args)
+        aggregated[f"geometry_{idx}"] = run_one_geometry(config_module, SIMULATION_cls, geom, args)
         print(f"  [{idx + 1}/{len(geometries)}] 完成，用时 {time.time() - t_geo:.1f}s")
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
