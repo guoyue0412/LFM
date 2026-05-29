@@ -23,6 +23,48 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 echo "▸ LFM 根目录：$ROOT"
 
+# ── 0. 确定要使用的 Python 解释器 ─────────────────────────────────────
+# conda 激活必须在 Python 调用之前，否则 numpy 等依赖不可用
+_PYTHON="python3"  # 默认回退
+
+if [[ $SKIP_CONDA -eq 0 ]]; then
+    # 先找 conda
+    CONDA_BASE=""
+    if command -v conda >/dev/null 2>&1; then
+        CONDA_BASE="$(conda info --base 2>/dev/null)"
+    else
+        # 尝试常见路径
+        for _p in /data/xzfang/miniconda3 "$HOME/miniconda3" "$HOME/anaconda3" /opt/conda; do
+            if [[ -f "$_p/etc/profile.d/conda.sh" ]]; then
+                CONDA_BASE="$_p"; break
+            fi
+        done
+    fi
+    if [[ -z "$CONDA_BASE" ]]; then
+        echo "✖ 未检测到 conda；请先安装 Miniconda/Anaconda，或加 --skip-conda 跳过"
+        exit 4
+    fi
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+        echo "▸ 创建 conda 环境：$ENV_NAME (python=$PY_VERSION)"
+        conda create -n "$ENV_NAME" "python=$PY_VERSION" -y
+    fi
+    conda activate "$ENV_NAME"
+    echo "▸ 已激活环境：$ENV_NAME ($(python --version 2>&1))"
+    pip install -r requirements.txt
+    _PYTHON="python"
+else
+    # --skip-conda：尝试找 conda LFM env 的 python（已安装好依赖）
+    for _p in /data/xzfang/miniconda3 "$HOME/miniconda3" "$HOME/anaconda3" /opt/conda; do
+        _cand="$_p/envs/$ENV_NAME/bin/python"
+        if [[ -x "$_cand" ]]; then
+            _PYTHON="$_cand"
+            break
+        fi
+    done
+    echo "▸ --skip-conda：使用 Python → $_PYTHON ($(${_PYTHON} --version 2>&1))"
+fi
+
 # ── 1. 校验 submodule 已 init ──────────────────────────────────────────
 SUB="Propeller_project-main"
 if [[ ! -f "$SUB/code/Simulation_QBlade/config.py" ]]; then
@@ -37,7 +79,7 @@ echo "▸ 子模块分支：$SUB_BRANCH ($(git -C "$SUB" rev-parse --short HEAD)
 
 # ── 2. 校验 .so 在位 ────────────────────────────────────────────────────
 # 从子模块 config.py 读 QBlade_dll（变量名虽为 dll，实际指向 .so）
-SO_REL="$(python3 - "$SUB/code/Simulation_QBlade" <<'PY'
+SO_REL="$($_PYTHON - "$SUB/code/Simulation_QBlade" <<'PY'
 import os, runpy, sys
 cfg_dir = sys.argv[1]
 os.chdir(cfg_dir)
@@ -69,27 +111,8 @@ else
     echo "▸ 当前平台无 ldd（非 Linux？），跳过系统依赖检查"
 fi
 
-# ── 4. conda 环境 ──────────────────────────────────────────────────────
-if [[ $SKIP_CONDA -eq 0 ]]; then
-    if ! command -v conda >/dev/null 2>&1; then
-        echo "✖ 未检测到 conda；请先安装 Miniconda/Anaconda，或加 --skip-conda 跳过"
-        exit 4
-    fi
-    # 使 conda activate 在脚本中可用
-    source "$(conda info --base)/etc/profile.d/conda.sh"
-    if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-        echo "▸ 创建 conda 环境：$ENV_NAME (python=$PY_VERSION)"
-        conda create -n "$ENV_NAME" "python=$PY_VERSION" -y
-    fi
-    conda activate "$ENV_NAME"
-    echo "▸ 已激活环境：$ENV_NAME ($(python --version 2>&1))"
-    pip install -r requirements.txt
-else
-    echo "▸ --skip-conda：使用当前 Python ($(python3 --version 2>&1))"
-fi
-
-# ── 5. ctypes dry-load .so ─────────────────────────────────────────────
-python3 - "$SO_PATH" <<'PY'
+# ── 4. ctypes dry-load .so ─────────────────────────────────────────────
+$_PYTHON - "$SO_PATH" <<'PY'
 import ctypes, sys
 so = sys.argv[1]
 try:
@@ -101,6 +124,6 @@ except OSError as e:
 PY
 
 echo
-echo "✅ 环境就绪。下一步可跑："
+echo "✅ 环境就绪 (Python: $_PYTHON)。下一步可跑："
 echo "    bash scripts/smoke_test.sh         # 最小冒烟（1 几何 × 全工况 → data.py）"
 echo "    bash scripts/run_data_gen.sh --help"
