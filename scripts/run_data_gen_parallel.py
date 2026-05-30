@@ -81,25 +81,30 @@ def setup_worker_workdir(worktree_root: str) -> Path:
 
     工作目录结构：
         <worktree_root>/lfm_w<pid>/
-            ├── code/                   → 符号链接到 SUB_CODE_ROOT 的父目录的 code/
-            ├── QBladeCE_2.0.8.6/       → 符号链接到 SUB_LIB_ROOT
-            └── QBlade_data/            ← 深拷贝（每 worker 独立写）
+            ├── code/                   ← 深拷贝（仅 ~164KB；worker 要 chdir 进去）
+            ├── QBladeCE_2.0.8.6/       → 符号链接（read-only，QBlade SIL 入口）
+            └── QBlade_data/            ← 深拷贝（每 worker 独立写 .sim/.qpr）
+
+    重要：code/ 必须深拷贝（不能 symlink），否则 chdir(symlink) 后
+    os.getcwd() 会跟随到真实路径（submodule 原位），config.py 用 os.getcwd()
+    解析的所有 file_path 都会指回 source 目录，worker 之间互相冲突。
     """
     pid = os.getpid()
     work_root = Path(worktree_root) / f"lfm_w{pid}"
     work_root.mkdir(parents=True, exist_ok=True)
 
-    # 共享只读：code/（含 class_sim、config.py、simulation_parameters）
-    code_link = work_root / "code"
-    if not code_link.exists():
-        code_link.symlink_to(SUBMODULE_ROOT / "code")
-
-    # 共享只读：QBladeCE_2.0.8.6/（含 .so 与 SIL_Interface）
+    # 共享只读：QBladeCE_2.0.8.6/（worker 不会 chdir 进去，symlink 安全）
     lib_link = work_root / "QBladeCE_2.0.8.6"
     if not lib_link.exists():
         lib_link.symlink_to(SUB_LIB_ROOT)
 
-    # 独立可写：QBlade_data/（.sim 文件生成 + .qpr 保存）
+    # 必须独立：code/（worker 要 chdir 到 code/Simulation_QBlade）
+    code_dir = work_root / "code"
+    if not code_dir.exists():
+        shutil.copytree(SUBMODULE_ROOT / "code", code_dir,
+                        symlinks=False, ignore=shutil.ignore_patterns("__pycache__"))
+
+    # 必须独立：QBlade_data/（.sim/.bld/.qpr 写入隔离）
     data_dir = work_root / "QBlade_data"
     if not data_dir.exists():
         shutil.copytree(SUB_DATA_ROOT, data_dir)
