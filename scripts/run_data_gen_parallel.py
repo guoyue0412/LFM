@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--workers", type=int, default=16,
                    help="并行进程数；node6 默认 16；node1 推荐 8")
+    p.add_argument("--omp-threads", type=int, default=8,
+                   help="每 worker 内部 OMP/MKL/BLAS 线程数；默认 8。"
+                        "workers × omp-threads 应 ≤ 物理核心数；"
+                        "node6 (160 核) 推荐 16×8=128，留 32 核给系统/QBlade Qt helper")
     p.add_argument("--device", choices=["CPU"], default="CPU",
                    help="强制 CPU 模式（GPU 路径在 propeller 工况下 hang，详见 RESEARCH_LOG #11）")
     p.add_argument("--geometry-npy", type=str, default=None,
@@ -112,11 +116,24 @@ def setup_worker_workdir(worktree_root: str) -> Path:
     return work_root / "code" / "Simulation_QBlade"
 
 
-def worker_init(worktree_root: str) -> None:
+def worker_init(worktree_root: str, omp_threads: int) -> None:
     """Pool worker 启动钩子：建工作目录、chdir、注入 sys.path、import 子模块。
 
     在 fork 子进程中执行（每个 worker 进程仅一次）。
+
+    限制每 worker 内部并行度（OMP/BLAS/MKL），避免多 worker × 多线程
+    在 N 核机器上 over-subscription：实测 4 worker × 32 OMP 线程
+    + ~200 Qt/OpenCL helper 线程 = 900+ runnable thread → load avg
+    ~200, 单几何 wall clock 从 5min 拖到 20+min。
     """
+    # 必须在 import QBlade SIL 之前设置，否则 .so 启动时已读取环境
+    os.environ["OMP_NUM_THREADS"] = str(omp_threads)
+    os.environ["OMP_THREAD_LIMIT"] = str(omp_threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(omp_threads)
+    os.environ["MKL_NUM_THREADS"] = str(omp_threads)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(omp_threads)
+    os.environ["QT_THREAD_POOL_MAX_THREAD_COUNT"] = str(omp_threads)
+
     work_cwd = setup_worker_workdir(worktree_root)
     os.chdir(work_cwd)
     sys.path.insert(0, str(work_cwd))
@@ -222,7 +239,7 @@ def main() -> int:
     try:
         with ctx.Pool(processes=n_workers,
                       initializer=worker_init,
-                      initargs=(args.worktree_root,)) as pool:
+                      initargs=(args.worktree_root, args.omp_threads)) as pool:
             for (geom_idx, result, err) in pool.imap_unordered(worker_run, tasks):
                 if result is not None:
                     aggregated[f"geometry_{geom_idx}"] = result
