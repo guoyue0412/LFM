@@ -67,6 +67,13 @@ def parse_args() -> argparse.Namespace:
                    help="形状 (N, 22, 3) 的几何 numpy 文件；省略则只跑 baseline 1 个几何")
     p.add_argument("--first-n-geoms", type=int, default=None,
                    help="只跑前 N 个几何，用于产能基线测试")
+    p.add_argument("--start-idx", type=int, default=0,
+                   help="几何起始索引（含），用于断点续传；默认 0")
+    p.add_argument("--end-idx", type=int, default=None,
+                   help="几何结束索引（不含），用于断点续传或分批；默认全部")
+    p.add_argument("--batch-size", type=int, default=0,
+                   help="每 N 个几何落一个 pkl（0 = 跑完一次性落盘）。"
+                        "推荐大规模时设 16 或 32，配合断点续传；崩了只丢一批")
     p.add_argument("--num-timesteps", type=int, default=None,
                    help="仿真步数，默认取 config.number_of_timesteps（1000）")
     p.add_argument("--out-dir", type=str, default=str(LFM_ROOT / "data_for_train" / "data"),
@@ -217,24 +224,53 @@ def main() -> int:
     os.chdir(saved_cwd)
 
     geometries = load_geometries(args.geometry_npy, baseline, args.first_n_geoms)
-    n_geoms = len(geometries)
+
+    # 切片：支持 --start-idx / --end-idx 断点续传
+    start = max(0, args.start_idx)
+    end = args.end_idx if args.end_idx is not None else len(geometries)
+    end = min(end, len(geometries))
+    if start >= end:
+        sys.exit(f"✖ start-idx={start} >= end-idx={end}，无几何可跑")
+    selected = [(global_idx, geom)
+                for global_idx, geom in enumerate(geometries)
+                if start <= global_idx < end]
+    n_geoms = len(selected)
     n_workers = min(args.workers, n_geoms) if n_geoms > 0 else 1
 
-    print(f"▸ 几何数: {n_geoms}, workers: {n_workers}, device: {args.device}, "
-          f"timesteps: {args.num_timesteps or '<default>'}")
+    print(f"▸ 几何总数 {len(geometries)}, 本次跑 [{start}, {end}) = {n_geoms} 个")
+    print(f"▸ workers: {n_workers}, omp/worker: {args.omp_threads}, "
+          f"device: {args.device}, timesteps: {args.num_timesteps or '<default>'}")
+    if args.batch_size > 0:
+        print(f"▸ 分批落盘: 每 {args.batch_size} 几何写一个 pkl")
     print(f"▸ 工作目录父级: {args.worktree_root}/lfm_w<pid>/")
     print(f"▸ submodule: {SUBMODULE_ROOT}")
 
-    tasks = [(idx, geom, args.num_timesteps, args.device)
-             for idx, geom in enumerate(geometries)]
+    tasks = [(global_idx, geom, args.num_timesteps, args.device)
+             for global_idx, geom in selected]
 
     # 用 fork 上下文（子进程继承 LD_LIBRARY_PATH 与 sys.path）
     # spawn 也可以但启动慢、需要重新 import；fork 在 Linux 上更高效
     ctx = mp.get_context("fork")
 
     t_start = time.time()
-    aggregated: dict[str, dict] = {}
-    failed: list[tuple] = []
+    aggregated: dict[str, dict] = {}   # 当前 batch 缓冲
+    all_failed: list[tuple] = []
+    n_done_total = 0
+    n_batches_written = 0
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+
+    def flush_batch():
+        """把当前 batch buffer 落盘并清空。"""
+        nonlocal aggregated, n_batches_written
+        if not aggregated:
+            return
+        suffix = f"_b{n_batches_written:04d}" if args.batch_size > 0 else ""
+        out_pkl = out_dir / f"data_{args.tag}_{stamp}{suffix}.pkl"
+        with open(out_pkl, "wb") as f:
+            pickle.dump(aggregated, f)
+        print(f"  💾 落盘 {out_pkl.name} ({len(aggregated)} 几何)", flush=True)
+        aggregated = {}
+        n_batches_written += 1
 
     try:
         with ctx.Pool(processes=n_workers,
@@ -244,28 +280,29 @@ def main() -> int:
                 if result is not None:
                     aggregated[f"geometry_{geom_idx}"] = result
                 else:
-                    failed.append((geom_idx, err))
-                done = len(aggregated) + len(failed)
-                print(f"  进度: {done}/{n_geoms} "
-                      f"(成功 {len(aggregated)}, 失败 {len(failed)})", flush=True)
+                    all_failed.append((geom_idx, err))
+                n_done_total += 1
+                print(f"  进度: {n_done_total}/{n_geoms} "
+                      f"(成功 {n_done_total - len(all_failed)}, "
+                      f"失败 {len(all_failed)})", flush=True)
+                # 分批落盘：避免崩了丢全部
+                if args.batch_size > 0 and len(aggregated) >= args.batch_size:
+                    flush_batch()
+        # 收尾：把剩余的也落盘
+        flush_batch()
     finally:
         cleanup_worktrees(args.worktree_root, args.keep_worktree)
 
     total = time.time() - t_start
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    out_pkl = out_dir / f"data_{args.tag}_{stamp}.pkl"
-    with open(out_pkl, "wb") as f:
-        pickle.dump(aggregated, f)
-
     print()
-    print(f"✅ 总用时 {total:.1f}s（壁钟）={total/60:.1f}min")
+    print(f"✅ 总用时 {total:.1f}s（壁钟）={total/60:.1f}min={total/3600:.2f}h")
     print(f"   平均每几何 {total/max(n_geoms,1):.1f}s（壁钟）")
     print(f"   理论加速比 ≈ {n_workers}× vs 单进程")
-    print(f"   输出 pkl: {out_pkl} ({len(aggregated)} 个几何)")
-    if failed:
-        print(f"   ⚠ {len(failed)} 个几何失败：{[i for i,_ in failed]}")
+    print(f"   产出 {n_batches_written} 个 pkl 文件，目录: {out_dir}")
+    if all_failed:
+        print(f"   ⚠ {len(all_failed)} 个几何失败：{[i for i,_ in all_failed]}")
     print(f"   下一步: cd {LFM_ROOT} && python data.py")
-    return 0 if not failed else 2
+    return 0 if not all_failed else 2
 
 
 if __name__ == "__main__":
