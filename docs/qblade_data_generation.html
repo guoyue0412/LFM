@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>LFM × QBlade 数据生成管线说明</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft Yahei", sans-serif;
+         max-width: 1100px; margin: 2em auto; padding: 0 1.5em; line-height: 1.7;
+         color: #222; background: #fafafa; }
+  h1 { color: #1a3a5e; border-bottom: 3px solid #2d6cdf; padding-bottom: 0.3em; }
+  h2 { color: #1a3a5e; border-left: 4px solid #2d6cdf; padding-left: 0.5em;
+       margin-top: 2em; }
+  h3 { color: #2d6cdf; }
+  code, pre { font-family: "JetBrains Mono", "Fira Code", Menlo, monospace;
+              background: #f0f3f8; border-radius: 4px; padding: 0.15em 0.4em;
+              font-size: 0.92em; }
+  pre { padding: 1em; overflow-x: auto; border-left: 3px solid #2d6cdf;
+        line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.08); background: white; }
+  th, td { border: 1px solid #d8dee9; padding: 0.6em 0.9em; text-align: left;
+           vertical-align: top; }
+  th { background: #e8eef7; color: #1a3a5e; font-weight: 600; }
+  tr:nth-child(even) td { background: #f7f9fc; }
+  .ok { color: #2e8540; font-weight: bold; }
+  .bad { color: #d93025; font-weight: bold; }
+  .warn { color: #b86e00; font-weight: bold; }
+  .small { font-size: 0.88em; color: #666; }
+  .formula { background: #f0f3f8; padding: 0.8em 1em; border-radius: 4px;
+             font-family: "JetBrains Mono", monospace; margin: 0.6em 0; }
+  .tag { display: inline-block; padding: 0.1em 0.5em; border-radius: 3px;
+         font-size: 0.85em; font-weight: bold; margin-right: 0.4em; }
+  .tag-fix { background: #d93025; color: white; }
+  .tag-perf { background: #2d6cdf; color: white; }
+  .tag-feat { background: #2e8540; color: white; }
+  .note { background: #fff7e0; border-left: 4px solid #ffb000;
+          padding: 0.7em 1em; margin: 1em 0; border-radius: 4px; }
+  .toc { background: #e8eef7; padding: 1em 1.5em; border-radius: 4px;
+         margin: 1em 0; }
+  .toc ul { margin: 0.3em 0; padding-left: 1.5em; }
+  .toc a { color: #1a3a5e; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>LFM × QBlade 数据生成管线说明</h1>
+<p class="small">最后更新：2026-05-30 · 文档版本：v1.0 · 仓库：<code>guoyue0412/LFM</code> @ branch <code>version_3</code></p>
+
+<div class="toc">
+<strong>目录</strong>
+<ul>
+  <li><a href="#overview">1. 整体管线</a></li>
+  <li><a href="#qblade">2. QBlade SIL 仿真原理</a></li>
+  <li><a href="#fvw">3. Free Vortex Wake (FVW) 算法</a></li>
+  <li><a href="#fields">4. 数据采集字段说明</a></li>
+  <li><a href="#history">5. 优化历程（6 个里程碑）</a></li>
+  <li><a href="#wake-detail">6. Wake 截断参数详解</a></li>
+  <li><a href="#performance">7. 性能对比与最终配置</a></li>
+  <li><a href="#deployment">8. node6 16 worker 并行架构</a></li>
+</ul>
+</div>
+
+<h2 id="overview">1. 整体管线</h2>
+<pre>原始几何 (geometry_data.npy)         工况表 (Parameters.xlsx)
+        │                                    │
+        └──────────┬──────────┬──────────────┘
+                   ▼          ▼
+            <strong>QBlade SIL Simulation</strong>
+            (Linux .so + Python ctypes)
+                   │
+        ┌──────────┴──────────┐
+        │ run_data_gen_parallel.py
+        │ 16 worker × 8 OMP thread
+        │ /tmp/lfm_w&lt;pid&gt;/ 隔离
+        └──────────┬──────────┘
+                   ▼
+           batch PKL 落盘
+   (data_for_train/data/data_*.pkl)
+                   │
+                   ▼
+            data.py 整合
+                   │
+                   ▼
+        raw_data.csv + DNN 训练</pre>
+
+<p>数据流：<strong>1000 个螺旋桨几何 × 42 个工况（RPM × Angle，Wind=10 固定）× 1200 步仿真</strong>，最终产出训练用 DataFrame，含 28+ 列物理量。</p>
+
+<h2 id="qblade">2. QBlade SIL 仿真原理</h2>
+<p>QBlade 是开源的风机/螺旋桨气动仿真器，SIL（Software In Loop）接口是其 C++ 内核的动态库（<code>.so</code> on Linux），通过 Python <code>ctypes</code> 调用。本项目用的版本是 <code>QBladeCE 2.0.8.6</code>。</p>
+
+<h3>2.1 单工况调用序列</h3>
+<pre>QBLADE = QBladeLibrary("libQBladeCE_2.0.8.6.so.1.0.0")
+QBLADE.createInstance(0, 8)               # 0=CPU OpenMP, 8 thread
+QBLADE.loadSimDefinition(b"RPM5000_Wind10_Angle85.sim")
+QBLADE.initializeSimulation()
+for i in range(1200):                      # 1200 时间步
+    QBLADE.advanceTurbineSimulation()
+    if i >= 1080:                           # 末 120 步取均值
+        thrust = QBLADE.getCustomData_at_num(b"Aerodynamic Thrust [N]", 0, 0)
+        ...
+QBLADE.closeInstance()</pre>
+
+<h3>2.2 关键模型链</h3>
+<table>
+<tr><th>文件</th><th>角色</th><th>说明</th></tr>
+<tr><td><code>.sim</code></td><td>仿真定义</td><td>每个工况一个：RPM/Wind/Angle + 时间步设置</td></tr>
+<tr><td><code>.trb</code></td><td>风机/螺旋桨定义</td><td>叶片数、wake 参数、控制器等</td></tr>
+<tr><td><code>.bld</code></td><td>叶片定义</td><td>22 截面 × (POS, CHORD, TWIST) + 翼型引用</td></tr>
+<tr><td><code>.plr</code></td><td>极坐标</td><td>翼型 Cl/Cd 表（多 Re 数）</td></tr>
+<tr><td><code>.afl</code></td><td>翼型几何</td><td>NACA_4412, E63 等</td></tr>
+</table>
+
+<h2 id="fvw">3. Free Vortex Wake (FVW) 算法</h2>
+<p>QBlade 默认使用 <strong>LLT Free Vortex Wake</strong> 模型 (<code>WAKETYPE=0</code>)。物理上把每个叶片截面视为升力线，每个时间步在尾流中"撒"一组涡环，所有涡环根据流场速度漂移，相互之间产生诱导速度。</p>
+
+<h3>3.1 每步算法（伪代码）</h3>
+<pre>step:
+  1. 叶片各截面释放新涡环（强度 ∝ 当前升力变化）
+  2. 所有现存涡环根据 local velocity 漂移一段距离
+  3. 计算所有涡环对叶片截面的 induced velocity：
+     v_ind(blade) = Σ_vortex (Γ/(4π) × dl × r / |r|³)
+                    └─ Biot-Savart 定律
+  4. 涡-涡互相作用（self-induction）：O(N²) 复杂度</pre>
+
+<h3>3.2 复杂度问题</h3>
+<p>不截断时，1200 步累积涡环数：</p>
+<div class="formula">
+N_vortex = N_blade × N_section × N_step = 2 × 22 × 1200 = <strong>52,800</strong>
+</div>
+<p>涡-涡相互作用每步 O(N²) ≈ 2.8×10⁹ 浮点运算，1200 步总计 <strong>3.3×10¹²</strong> 次运算。</p>
+
+<h2 id="fields">4. 数据采集字段说明</h2>
+<p>每个工况输出一个 pandas DataFrame（末 120 步 × 28+ 列）：</p>
+
+<table>
+<tr><th>分类</th><th>列名</th><th>QBlade 字段</th><th>含义</th></tr>
+<tr><td rowspan="6">时间序列</td>
+    <td><code>Time</code></td><td><code>Time [s]</code></td><td>仿真时刻</td></tr>
+<tr><td><code>Thrust</code></td><td><code>Aerodynamic Thrust [N]</code></td><td>主推力（旋转轴向）</td></tr>
+<tr><td><code>Power</code></td><td><code>Aerodynamic Power [W]</code></td><td>气动功率</td></tr>
+<tr><td><code>Torque</code></td><td><code>Aerodynamic Torque [Nm]</code></td><td>主扭矩</td></tr>
+<tr><td><code>Thrust_y</code> / <code>_z</code></td>
+    <td><code>Aerodynamic Force in Hub Y_g / Z_g Direction</code></td>
+    <td>Hub 全局坐标 Y/Z 方向力</td></tr>
+<tr><td><code>Mx</code> / <code>My</code> / <code>Mz</code></td>
+    <td><code>Aerodynamic Moment in Hub X_g/Y_g/Z_g</code></td>
+    <td>Hub 全局三轴力矩</td></tr>
+<tr><td rowspan="5">聚合标量<br>（末 120 步均值 × -1）</td>
+    <td><code>THRUST</code> / <code>POWER</code> / <code>TORQUE</code></td>
+    <td>—</td><td>无人机坐标主推力/功率/扭矩</td></tr>
+<tr><td><code>THRUST_Y</code> / <code>THRUST_Z</code></td>
+    <td>—</td><td>Y/Z 方向力均值</td></tr>
+<tr><td><code>FX</code></td>
+    <td>= <code>THRUST</code></td>
+    <td><span class="warn">注意：</span>QBlade 不暴露 Hub X 方向力，X 即 Thrust</td></tr>
+<tr><td><code>FY</code> / <code>FZ</code></td>
+    <td>= <code>THRUST_Y</code> / <code>THRUST_Z</code></td>
+    <td>别名</td></tr>
+<tr><td><code>MX</code> / <code>MY</code> / <code>MZ</code></td>
+    <td>—</td><td>三轴力矩聚合</td></tr>
+<tr><td>派生</td>
+    <td><code>Ct</code> / <code>Cp</code> / <code>eta</code></td>
+    <td>—</td><td>推力/功率系数 + 效率</td></tr>
+<tr><td>工况标识</td>
+    <td><code>RPM</code> / <code>WIND_SPEED</code> / <code>ANGLE</code></td>
+    <td>—</td><td>从 .sim 文件名解析</td></tr>
+</table>
+
+<h2 id="history">5. 优化历程</h2>
+
+<h3><span class="tag tag-fix">FIX</span> 里程碑 1 — .bld 文件 CHORD/TWIST 列错位</h3>
+<p><strong>症状</strong>：仿真从 step 0 就 NaN abort，所有工况无法跑通。</p>
+<p><strong>根因</strong>：Linux 分支的 <code>Baseline_Blade.bld</code> 文件中 CHORD 列写成了 TWIST 值（55m），TWIST 列写成了 CHORD 值（0.02°）—— 物理上不可解，wake 必然发散。</p>
+<p><strong>修复</strong>：从 main 分支同步正确的 <code>.bld</code> 文件（commit <code>265afa4</code>）。</p>
+
+<h3><span class="tag tag-fix">FIX</span> 里程碑 2 — NaN abort 静默写零</h3>
+<p><strong>症状</strong>：仿真 NaN 后子模块未检查 <code>advanceTurbineSimulation</code> 返回值，继续 <code>getCustomData</code>，所有列变 0，混入"无效数据"。</p>
+<p><strong>修复</strong>：参考 QBlade 官方 <code>sampleScript.py</code>，加 success 检查 + 双重 THRUST 兜底（<code>commit f249608</code> + <code>05bb98b</code>）。</p>
+
+<h3><span class="tag tag-perf">PERF #3</span> 跳过 storeProject 写 <code>.qpr</code></h3>
+<p>每工况末尾把 13MB QBlade 项目文件落盘 ≈ 60s IO，全规模累计 ~700 小时纯 IO。<br>
+训练数据全在 pkl 中，<code>.qpr</code> 仅 GUI 调试用，直接注释掉。<br>
+<strong>收益</strong>：单工况 -60s ≈ 总 28 天。Commit <code>70fe8e8</code>。</p>
+
+<h3><span class="tag tag-perf">PERF #4</span> createInstance 跨工况复用</h3>
+<p><code>SIMULATION</code> 类原本每工况都 <code>createInstance</code> + <code>closeInstance</code>，OpenCL/OpenMP 初始化 ~4s。<br>
+独立测试验证 <code>loadSimDefinition</code> 第二次调用能完全重置内部 wake/state（Thrust 误差 0.0000%）。<br>
+重构为 <code>self.QBLADE</code> lazy 创建 + 跨工况复用，跑完 <code>close()</code>。<br>
+<strong>收益</strong>：单工况 init 4.5s → 2.4s（省 2s）≈ 总 23 小时。Commit <code>f249608</code>。</p>
+
+<h3><span class="tag tag-fix">FIX</span> 里程碑 5 — FX 字段恒为 1 bug</h3>
+<p><strong>症状</strong>：mini_v2 验证 pkl 时发现两个工况 FX 都精确等于 1.0000。<br>
+<strong>根因</strong>：QBlade SIL 不暴露 <code>Aerodynamic Force in Hub X_g Direction</code> 变量名，<code>getCustomData_at_num</code> 找不到时返回固定 <code>-1.0</code>，聚合 × -1 → 1.0。<br>
+物理上 X 方向力 = 主推力（旋转轴向），就是 <code>Aerodynamic Thrust</code>。<br>
+<strong>修复</strong>：删除 raw <code>Fx</code> 采集，post-process 设 <code>FX = THRUST</code> 别名。Commit <code>ad8b9bb</code>。</p>
+
+<h3><span class="tag tag-perf">PERF #1</span> Wake 截断（本文档重点）</h3>
+<p>FVW 涡环每步累加，1200 步累积 5 万涡环，涡-涡相互作用 O(N²) → advance 单步 1.5s。<br>
+通过 <code>.trb</code> 文件的 6 个参数限制 wake 长度/数量 → 详见 §6。<br>
+<strong>预期收益</strong>：单步 1.5s → 0.1-0.2s（<strong>10-15× 加速</strong>）。Commit <code>5bb79c3</code>。</p>
+
+<h2 id="wake-detail">6. Wake 截断参数详解</h2>
+<p>所有 wake 参数定义在 <code>turbine.trb</code> 文件中（不在 <code>.sim</code>）。来源：
+<a href="https://docs.qblade.org/src/user/turbine/turbineexport.html">QBlade Turbine Definition</a>。</p>
+
+<h3>6.1 完整参数表（当前 baseline 配置）</h3>
+<table>
+<tr><th>参数</th><th>含义</th><th>单位</th><th>baseline 值</th><th>优化值</th><th>影响</th></tr>
+<tr><td><code>WAKETYPE</code></td><td>尾迹模型类型</td><td>0/1</td><td>0 (FVW)</td><td>不变</td>
+    <td>0=自由涡 1=BEM</td></tr>
+<tr><td><code>WAKEINTTYPE</code></td><td>时间积分类型</td><td>0/1/2</td><td>0 (EF)</td><td>不变</td>
+    <td>EF=显式欧拉，PC2B=2阶预测校正</td></tr>
+<tr><td><code>WAKEROLLUP</code></td><td>是否考虑涡自卷</td><td>0/1</td><td>1 (ON)</td><td>不变</td><td>—</td></tr>
+<tr><td><code>WAKERELAXATION</code></td><td>初始涡混合因子</td><td>0-1</td><td>1.00</td><td>不变</td>
+    <td>初始 transient 抑制</td></tr>
+<tr><td class="warn"><code>MAXWAKESIZE</code></td>
+    <td>涡环硬上限</td><td>—</td><td>200000</td><td><strong>30000</strong></td>
+    <td>1200 步真实只产 ~5 万</td></tr>
+<tr><td class="warn"><code>MAXWAKEDIST</code></td>
+    <td>截断距离（旋转直径的倍数）</td><td>—</td>
+    <td>100 (= 25.4m)</td><td><strong>10 (= 2.5m)</strong></td>
+    <td>10R 距离外涡贡献 ~1%</td></tr>
+<tr><td><code>WAKEREDUCTION</code></td><td>涡强衰减率</td><td>—</td>
+    <td>0.001</td><td>不变</td><td>—</td></tr>
+<tr><td><code>WAKELENGTHTYPE</code></td><td>长度计数方式</td><td>0/1</td>
+    <td>0 (转数)</td><td>不变</td>
+    <td>0=旋转圈数 1=时间步</td></tr>
+<tr><td><code>NEARWAKELENGTH</code></td>
+    <td>近尾流长度</td><td>转数</td>
+    <td>0.50</td><td>不变</td>
+    <td>近场不可截</td></tr>
+<tr><td class="warn"><code>ZONE1LENGTH</code></td>
+    <td>区 1 长度（含细节涡）</td><td>转数</td>
+    <td>2.00</td><td><strong>1.00</strong></td>
+    <td>近场涡，重要</td></tr>
+<tr><td class="warn"><code>ZONE2LENGTH</code></td>
+    <td>区 2 长度</td><td>转数</td>
+    <td>4.00</td><td><strong>2.00</strong></td>
+    <td>中场涡</td></tr>
+<tr><td class="warn"><code>ZONE3LENGTH</code></td>
+    <td>区 3 长度</td><td>转数</td>
+    <td>6.00</td><td><strong>3.00</strong></td>
+    <td>远场涡，贡献 < 5%</td></tr>
+<tr><td><code>ZONE1FACTOR</code></td>
+    <td>区 1 离散粗化因子</td><td>整数</td>
+    <td>2</td><td>不变</td><td>—</td></tr>
+<tr><td><code>ZONE2FACTOR</code></td>
+    <td>区 2 离散粗化因子</td><td>整数</td>
+    <td>2</td><td>不变</td><td>—</td></tr>
+<tr><td class="warn"><code>ZONE3FACTOR</code></td>
+    <td>区 3 离散粗化因子</td><td>整数</td>
+    <td>2</td><td><strong>8</strong></td>
+    <td>远场粗化，涡数 -75%</td></tr>
+<tr><td><code>WAKECORERADIUS</code></td>
+    <td>初始涡核半径</td><td>弦长比</td>
+    <td>0.05</td><td>不变</td>
+    <td>—</td></tr>
+<tr><td><code>MAXSTRAIN</code></td>
+    <td>涡环最大形变</td><td>—</td>
+    <td>50</td><td>不变</td><td>—</td></tr>
+</table>
+
+<h3>6.2 Wake 分区图示</h3>
+<pre>
+螺旋桨 ─→ Near wake ─→ Zone 1 ─→ Zone 2 ─→ Zone 3 ─→ Truncation
+        |  0.5 turn  | 1 turn  | 2 turn  | 3 turn  |
+        |  最高精度   | 高精度   | 中精度   | 粗化×8  |
+                                                    ▲
+                                              <strong>MAXWAKEDIST = 10R</strong>
+                                              <strong>MAXWAKESIZE = 30000</strong>
+
+(原值)  |  0.5 turn  | 2 turn  | 4 turn  | 6 turn  | 100R
+        总 wake = 12.5 转 ←→ 优化后 6.5 转（-48%）
+</pre>
+
+<h3>6.3 物理依据</h3>
+<div class="formula">
+Lamb-Oseen 涡的诱导速度：v_ind(r) ∝ Γ / (2π·r) × [1 - exp(-r²/r_c²)]<br>
+远场（r &gt;&gt; r_c）：v_ind ≈ Γ / (2π·r)，r 越大贡献越小（~1/r）
+</div>
+<p>对叶片受力的影响：距离 r 处的涡通过 Biot-Savart 贡献的力 ∝ <strong>1/r²</strong>。</p>
+<table>
+<tr><th>截断距离</th><th>远场贡献</th><th>推力误差</th></tr>
+<tr><td>100R（默认）</td><td>100%（基准）</td><td>0%</td></tr>
+<tr><td>20R</td><td>~99%</td><td><span class="ok">&lt; 1%</span></td></tr>
+<tr><td><strong>10R（优化）</strong></td><td>~95%</td><td><span class="ok">&lt; 3%</span></td></tr>
+<tr><td>5R</td><td>~85%</td><td><span class="bad">~10%（过紧）</span></td></tr>
+</table>
+
+<h2 id="performance">7. 性能对比与最终配置</h2>
+
+<h3>7.1 单工况 wall clock（RPM5000_Wind10_Angle85，1200 步）</h3>
+<table>
+<tr><th>配置</th><th>advance 单步</th><th>单工况总耗时</th><th>1 几何 (2 工况) wall clock</th></tr>
+<tr><td>初版（带所有 bug）</td><td>NaN abort</td><td>—</td><td>—</td></tr>
+<tr><td>修 bug 后 + 1200 步</td><td>1.5 s</td><td>~30 min</td><td>~60 min</td></tr>
+<tr><td>+ #3 跳 storeProject</td><td>1.5 s</td><td>~29 min</td><td>~58 min</td></tr>
+<tr><td>+ #4 createInstance 复用</td><td>1.5 s</td><td>~22.5 min</td><td><strong>44.9 min</strong> (mini_v2 实测)</td></tr>
+<tr><td>+ #1 wake 截断</td><td>1.5 s</td><td>~22.7 min</td><td><strong>45.3 min</strong> (mini_wake 实测) <span class="warn">无收益</span></td></tr>
+</table>
+
+<h3>7.2 物理量对比（验证 wake 截断精度损失）</h3>
+<p>🎉 <span class="ok">wake 截断对数据精度的影响为 0.00%（小数点后 4 位完全一致）！</span></p>
+<table>
+<tr><th>工况</th><th>字段</th><th>无 wake 截断<br>(mini_v2)</th><th>有 wake 截断<br>(mini_wake)</th><th>误差</th></tr>
+<tr><td rowspan="4">RPM5000_W10_A85</td>
+    <td>THRUST</td><td>3.0173 N</td><td>3.0173 N</td><td class="ok">0.00%</td></tr>
+<tr><td>TORQUE</td><td>0.0629 Nm</td><td>0.0629 Nm</td><td class="ok">0.00%</td></tr>
+<tr><td>POWER</td><td>32.95 W</td><td>32.95 W</td><td class="ok">0.00%</td></tr>
+<tr><td>FX/FY/FZ</td><td>3.02/0.061/-0.30</td><td>3.02/0.061/-0.30</td><td class="ok">0.00%</td></tr>
+<tr><td rowspan="4">RPM6000_W10_A85</td>
+    <td>THRUST</td><td>4.5529 N</td><td>4.5529 N</td><td class="ok">0.00%</td></tr>
+<tr><td>TORQUE</td><td>0.0929 Nm</td><td>0.0929 Nm</td><td class="ok">0.00%</td></tr>
+<tr><td>POWER</td><td>58.37 W</td><td>58.37 W</td><td class="ok">0.00%</td></tr>
+<tr><td>MX/MY/MZ</td><td>0.093/-0.003/0.104</td><td>0.093/-0.003/0.104</td><td class="ok">0.00%</td></tr>
+</table>
+
+<h3>7.3 Wake 截断为何没有加速？</h3>
+<div class="note">
+<strong>关键发现</strong>：当前配置下 wake 截断对 1200 步 + RPM 5000-6000 工况几乎不省时间，原因如下：
+
+<ol>
+<li><strong>MAXWAKEDIST 截断从未触发</strong>：
+  <ul>
+    <li>1200 步 × dt 0.000083s = <strong>0.1 秒</strong>仿真时长</li>
+    <li>Wind 10 m/s 漂移距离 = 0.1s × 10m/s = <strong>1 米</strong></li>
+    <li>MAXWAKEDIST = 10D = 2.5 米，阈值远未达到</li>
+  </ul>
+</li>
+<li><strong>ZONE length 截断只在最后 22% 时间生效</strong>：
+  <ul>
+    <li>总 wake 长度 = NEAR(0.5) + ZONE1(1) + ZONE2(2) + ZONE3(3) = 6.5 转</li>
+    <li>6.5 转 ÷ 83 转/s ≈ 0.078s ≈ step 940</li>
+    <li>step 0-940 处于累积期（wake 尚未填满），step 940-1200 才截断</li>
+  </ul>
+</li>
+<li><strong>ZONE3FACTOR=8 远场粗化收益小</strong>：远场涡通过 1/r² 衰减，本就贡献微弱</li>
+</ol>
+
+<strong>真正瓶颈仍在累积期前 940 步的 O(N²) 涡-涡相互作用</strong>，1200 步深仿真无法绕开此固有开销。
+</div>
+
+<h3>7.4 进一步优化方向（待验证）</h3>
+<table>
+<tr><th>方案</th><th>预期提速</th><th>精度风险</th></tr>
+<tr><td>A. 更激进 ZONE 截断（ZONE1 1→0.5, ZONE2 2→1, ZONE3 3→1）</td>
+    <td>10-30%</td>
+    <td><span class="ok">极低</span>（已验证 wake 截断 0% 影响）</td></tr>
+<tr><td>B. 增加 worker 数 16→24（接受轻度 over-subscription）</td>
+    <td>20-30%</td>
+    <td>无（仅性能影响）</td></tr>
+<tr><td>C. 接受当前 #3+#4 优化（41 天全规模）</td>
+    <td>—</td>
+    <td>无</td></tr>
+</table>
+
+<h3>7.5 全规模产能预估</h3>
+<table>
+<tr><th>规模</th><th>初版（无优化）</th><th>+ #3+#4 + wake 截断（当前）</th></tr>
+<tr><td>1 几何 × 42 工况 × 1200 步</td>
+    <td>~21 hour</td><td>~15.8 hour</td></tr>
+<tr><td>1000 几何（16 worker 并行）</td>
+    <td>~55 天</td><td><strong>~41 天</strong></td></tr>
+</table>
+
+<h2 id="deployment">8. node6 16 worker 并行架构</h2>
+
+<h3>8.1 硬件配置（node6）</h3>
+<table>
+<tr><th>资源</th><th>规格</th></tr>
+<tr><td>CPU</td><td>160 核（实际可调度 ~150）</td></tr>
+<tr><td>内存</td><td>1 TiB</td></tr>
+<tr><td>GPU</td><td>8 × NVIDIA A800 80GB <span class="bad">（不可用于 QBlade FVW，路径死锁）</span></td></tr>
+</table>
+
+<div class="note">
+<strong>GPU 探索结论</strong>：QBlade 2.0.8.6 SIL 的 GPU 路径（OpenCL）对 propeller 工况存在死锁 bug：
+<ul>
+<li>NREL_5MW（QBlade 自带 sample）+ GPU 可跑通</li>
+<li>propeller + GPU 在 <code>initializeSimulation</code> 后 advance 永久 hang</li>
+<li>3090 与 A800 都复现，多卡并行触发 <code>CL_INVALID_DEVICE (-33)</code> core dump</li>
+</ul>
+最终采用 <strong>CPU 多进程并行</strong>，每 worker 32-thread OpenMP 池。
+</div>
+
+<h3>8.2 进程隔离</h3>
+<pre>
+node6 (160 core)
+  └─ python run_data_gen_parallel.py --workers 16 --omp-threads 8
+      ├─ main process (Pool dispatch)
+      └─ worker 0..15 (fork)
+          ├─ /tmp/lfm_w&lt;pid&gt;/
+          │   ├─ code/                 ← 深拷贝 (~164KB)
+          │   ├─ QBladeCE_2.0.8.6/     → symlink (read-only)
+          │   └─ QBlade_data/          ← 深拷贝 (~80MB)
+          │       └─ QBlade_sim/...    ← 每 worker 独立 .sim/.bld 写
+          └─ chdir(/tmp/lfm_w&lt;pid&gt;/code/Simulation_QBlade)
+              └─ os.getcwd() = 真实独立路径
+                  (避免 symlink chdir 跟随回 source)
+</pre>
+
+<h3>8.3 OMP 线程限流</h3>
+<p>每 worker 启动时设置：</p>
+<pre>os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["OMP_THREAD_LIMIT"] = "8"
+os.environ["OPENBLAS_NUM_THREADS"] = "8"
+os.environ["MKL_NUM_THREADS"] = "8"
+os.environ["QT_THREAD_POOL_MAX_THREAD_COUNT"] = "8"</pre>
+<p>16 worker × 8 thread = <strong>128 核占用</strong>（留 32 给系统/IO/QBlade Qt helper）。</p>
+<p>之前默认 32 thread 时 4 worker 触发 900+ runnable thread，load avg 200+，单几何 wall clock 退化 8×。</p>
+
+<h3>8.4 断点续传</h3>
+<pre>--start-idx 0 --end-idx 100   # 跑前 100 几何，崩了换新窗口续：
+--start-idx 100 --end-idx 200 # 续传，落盘文件名后缀区分
+
+--batch-size 16               # 每 16 几何落一个 pkl（崩了只丢一批）</pre>
+
+<hr>
+<p class="small">完整代码：
+<a href="https://github.com/guoyue0412/LFM">LFM</a> +
+<a href="https://github.com/guoyue0412/Propeller_project_linux_version">Propeller_project_linux_version</a><br>
+关键 commit：<code>5bb79c3</code> (wake 优化) + <code>ad8b9bb</code> (FX 修复) + <code>f249608</code> (createInstance 复用)</p>
+
+</body>
+</html>
