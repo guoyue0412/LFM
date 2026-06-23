@@ -1,0 +1,26 @@
+# LaTeX 编译产物
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.synctex.gz
+*.xdv
+*.run.xml
+*.bcf
+*.nav
+*.snm
+*.idx
+*.ind
+*.ilg
+
+# macOS
+.DS_Store
+
+# 最终 PDF 不进版本控制（按需调整）
+# *.pdf

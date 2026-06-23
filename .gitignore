@@ -1,0 +1,71 @@
+# =========================================================
+# graduation monorepo — 顶层 .gitignore
+# code/ 内部还有自己的 .gitignore (来自原 LFM 仓库)
+# =========================================================
+
+# --------- macOS / IDE ---------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --------- Python ---------
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# --------- 数据 / 模型 (避免 >50 MB 单文件爆 GitHub) ---------
+*.pkl
+*.pth
+*.npz
+*.npy
+!code/data_for_train/geometries_lhs_1000.npy   # 关键设计文件保留
+
+# 仿真原始 pkl 数据库 (366 个 × 1MB, 太大不入库)
+code/data_for_train/data_lhs/
+code/data_for_train/data/
+
+# TensorBoard / 大图日志
+code/runs/
+
+# 大的 sweep 详情(只保留汇总图与 results.csv)
+code/sweep_results/*_detail.json
+code/sweep_results/*_curves.npz
+
+# --------- LaTeX 编译产物 ---------
+thesis/**/*.aux
+thesis/**/*.log
+thesis/**/*.out
+thesis/**/*.toc
+thesis/**/*.fls
+thesis/**/*.fdb_latexmk
+thesis/**/*.synctex.gz
+thesis/**/*.bbl
+thesis/**/*.blg
+thesis/**/*.idx
+thesis/**/*.ind
+thesis/**/*.ilg
+thesis/**/*.lof
+thesis/**/*.lot
+thesis/**/*.nav
+thesis/**/*.snm
+thesis/**/*.run.xml
+thesis/**/*-blx.bib
+# 保留 PDF 终版,不保留中间产物
+thesis/**/*.aux.bak
+
+# --------- QBlade 大型可执行/依赖 (submodule 内, 但已忽略) ---------
+*.dll
+*.so
+*.so.*
+
+# --------- 临时草稿 ---------
+*~
+*.bak
+.archived/

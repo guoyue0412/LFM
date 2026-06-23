@@ -1,0 +1,177 @@
+% !TEX root = ../thesis.tex
+
+\chapter{当前进展与后续工作安排}
+\label{chap:plan}
+
+本章汇报截至 2026 年 6 月的研究工作总体进展，
+重点描述 1000 几何 LLFVW 数据扩展的现状与瓶颈应对，
+并与开题报告中规划的进度安排进行对比分析，
+最后给出后续工作的详细计划与已识别风险的应对方案。
+
+\section{LLFVW 数据扩展：100$\to$1000 几何}
+
+\subsection{数据规模设计}
+
+为支撑 MoE 训练所需的样本规模，
+已在 GPU 平台上启动 1000 几何 $\times$ 42 工况
+（6 RPM $\times$ 7 Angle、Wind = 10 m/s）的全量数据生成，
+总样本量 42K。
+设计变量按 LHS（拉丁超立方抽样）以 $d = 8$、$\text{seed} = 42$ 在 baseline $\pm 30\%$ 范围内采样，
+落盘策略 \texttt{batch-size}=1，逐几何即时保存 pkl 文件，避免长周期作业中断丢失。
+
+\subsection{GPU 加速效果}
+
+数据生成在 Linux + RTX 3060 + OpenCL 后端下运行 QBlade SIL 求解器。
+对比单几何仿真耗时：
+\begin{itemize}
+  \item CPU 并行（原方案）：3.5 h/几何，吞吐 $\sim 6$ 几何/天；
+  \item GPU 独占（当前方案）：1.1 h/几何，吞吐 $\sim 21$ 几何/天；
+  \item 加速比：3.2$\times$。
+\end{itemize}
+
+\subsection{时间预估}
+
+按当前吞吐速率（$\sim 21$ 几何/天）测算：
+\begin{itemize}
+  \item geom 710--999 段约 13 天，预计 2026-06-20 完成；
+  \item geom 0--709 段约 33 天，预计 2026-07-23 完成；
+  \item 全量 1000 几何预计 2026 年 7 月下旬完成。
+\end{itemize}
+
+\subsection{滚动训练策略}
+
+为避免完全阻塞在数据生成阶段，本研究采用滚动训练策略：
+300+ 几何完成后即启动 MoE 初步训练，
+先行验证 V2 架构、调参流程与 CMA-ES 闭环；
+数据补齐后采用增量微调（warm-start），可节省 2$\sim$3 周等待时间。
+
+\section{与开题计划的对比}
+
+开题报告中规划的进度（2024.09--2026.11）与中期阶段（截至 2026 年 6 月）的实际执行情况对比如表~\ref{tab:progress}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{开题计划与实际进展对比}
+\label{tab:progress}
+\begin{tabular}{lp{3.5cm}p{4cm}l}
+\toprule
+\textbf{时间段} & \textbf{开题计划} & \textbf{实际执行} & \textbf{状态} \\
+\midrule
+2024.09--12 & 气动建模 + 仿真平台 & B-Spline + UIUC 验证 + 自动化框架 & 按计划 \\
+2025.01--04 & DNN 代理模型 & 100 几何 DNN + V1 pipeline，发现 OOD & 按计划 \\
+2025.05--08 & PPO 调参 NSGA-II & 通过 PPO vs CMA-ES 对照诊断 OOD 是根因，方法路线重构（MoE + 配平） & 方法调整 \\
+2025.09--11 & 复杂风场扩展（原计划） & 调整为聚焦稳态前飞 + 配平，V2 代码实现 & 范围调整 \\
+2025.12--26.04 & 外形优化与鲁棒 & QBlade Linux GPU，1000 几何启动 & 调整顺序 \\
+2026.05--06 & CFD 验证 & CFD 模板就绪，GPU 数据生成中 & 进行中 \\
+2026.07--08 & 结果整理 & MoE 训练 + CMA-ES 优化 + 回验 & 待执行 \\
+2026.09--11 & 论文与答辩 & 论文撰写与答辩准备 & 待执行 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{总体评价：}
+阶段 1$\sim$2（气动建模、DNN 代理）严格按计划完成；
+阶段 3$\sim$5 期间观察到 V1 + CMA-ES 给出 $FM=1.004$ 的物理不合理解，
+\textbf{基于"算法层 $\to$ 约束层 $\to$ 可信度层"的逐层排除诊断}
+（先以 PPO + NSGA-II 与 CMA-ES 双路线对照排除算法层、
+随后增加约束发现仍不解决根本问题、
+最终定位到代理模型缺乏 OOD 感知是根因），
+触发方法学路线调整（PPO + NSGA-II $\to$ CMA-ES + 配平、DNN $\to$ MoE）。
+这一调整并非"撞墙才回头"，而是有意识的方法学诊断过程，
+工作量增加但方法体系更扎实，技术路线更具创新性。
+阶段 4"复杂风场扩展"的研究范围经导师讨论后调整为聚焦恒定自由来流前飞工况下的差速配平优化，
+湍流风场建模与风场—优化耦合作为毕业论文阶段的扩展工作；
+CFD 验证模板已就绪并完成基线桨对照渲染；
+论文时间节点（2026.09--2026.11）未变。
+
+\section{后续工作详细计划}
+
+剩余工作按时间顺序排列如表~\ref{tab:future_plan_full}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{后续研究工作详细安排}
+\label{tab:future_plan_full}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{时间节点} & \textbf{研究内容} \\
+\midrule
+2026.06 进行中 & 1000 几何 LLFVW 数据生成（GPU $\sim$21 几何/天） \\
+2026.07 上旬 & \texttt{data.py} 转换 pkl $\to$ CSV；MoE 训练（K-fold 验证，300+ 几何先行） \\
+2026.07 下旬 & CMA-ES 优化闭环；$\sigma$ 引导主动补点；迭代收敛 \\
+2026.08 & QBlade LLFVW 全工况回验 + Star-CCM+ CFD 终验；$Q$-criterion、压力/速度切面可视化 \\
+2026.08--09 & 结果分析：基线 vs.\ 优化桨对比、控制点灵敏度；$\sigma$ 校准与 OOD 检测复盘 \\
+2026.09--11 & 论文撰写（5--6 万字）与答辩准备 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{关键里程碑}
+
+\textbf{已完成（$\checkmark$）：}
+\begin{itemize}
+  \item LHS 1000 几何采样设计；
+  \item QBlade Linux GPU 部署；
+  \item V2 管线代码完成（MoE + Trim + CMA-ES）；
+  \item batch-size=1 防丢失策略。
+\end{itemize}
+
+\textbf{进行中（$\circ$）：}
+\begin{itemize}
+  \item 1000 几何全量数据生成（geom 710-999 段）。
+\end{itemize}
+
+\textbf{待执行（$\circ$）：}
+\begin{itemize}
+  \item pkl $\to$ CSV 批量转换；
+  \item MoE 真实数据训练；
+  \item CMA-ES 优化 + 主动补点闭环；
+  \item QBlade 全工况回验 + Star-CCM+ CFD 终验。
+\end{itemize}
+
+\section{风险识别与应对方案}
+
+针对中期阶段已识别的四项主要风险，应对方案分别为：
+
+\subsection{数据生成周期长}
+
+1000 几何 $\times$ 42 工况的全量 LLFVW 仿真预计耗时约 47 天，
+是 MoE 训练的关键路径瓶颈。
+\emph{应对方案：}采用滚动训练策略，300+ 几何子集到位即启动 MoE 初步训练；
+数据补齐后采用增量微调，可节省 2$\sim$3 周等待时间。
+必要时申请深圳市超算中心资源提升 GPU 并行能力。
+
+\subsection{MoE 过拟合}
+
+$K = 4$ Experts $\times$ 双头（$\mu$、$\log\sigma$）输出参数量较大，
+存在过拟合风险。
+\emph{应对方案：}K-fold 交叉验证 + 早停（early stopping）+ Balance 正则化 + 熵正则化，
+防止 Expert 坍缩。
+关键超参数（$K$、隐藏层维度、$\lambda_{\text{bal}}$、$\lambda_{\text{ent}}$）通过 K-fold 网格搜索确定。
+
+\subsection{优化解持续命中边界}
+
+若 CMA-ES 收敛到 B-Spline 控制点范围边界，
+说明当前采样范围不足以覆盖最优区域。
+\emph{应对方案：}
+扩大 baseline $\pm 30\%$ 至 $\pm 50\%$；
+利用 MoE 输出的 $\sigma$ 进行主动补点采样，
+在高 $\sigma$ 区域追加 LLFVW 仿真，
+通过增量训练自适应扩展可信区域。
+
+\subsection{LLFVW 与 CFD 之间的系统性偏差}
+
+$\sim 10\%$ 的低保真模型误差可能影响 CMA-ES 收敛方向。
+\emph{应对方案：}
+在最优解附近布置 3$\sim$5 个多保真度验证点（CFD 校准），
+构造低保真到高保真的校正项；
+必要时引入 Co-Kriging 进行多保真度数据融合。
+
+\section{本章小结}
+
+本章汇报了 LLFVW 数据生成的当前进展（GPU 加速 3.2$\times$、预计 7 月下旬完成全量 42K 样本），
+通过详细对比开题计划与实际执行情况，
+说明阶段 1$\sim$2 按计划完成、阶段 3$\sim$5 因 OOD 发现触发方法学调整但论文时间节点未变。
+后续工作按 MoE 训练、CMA-ES 闭环、CFD 验证、论文撰写四个阶段推进，
+针对已识别的四项主要风险均给出了具体应对方案，
+具备如期完成全部研究内容、硕士学位论文撰写与最终答辩（2026 年 11 月）的可能性。

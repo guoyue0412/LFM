@@ -1,0 +1,119 @@
+% !TEX root = ../thesis.tex
+
+\chapter*{结论与展望}
+\addcontentsline{toc}{chapter}{结论与展望}
+
+\section*{主要结果}
+
+本文围绕"小型无人机螺旋桨前飞工况气动外形优化"这一核心问题，
+构建了"建模—优化—验证—可视化"一体化的研究平台。
+截至中期阶段已完成的主要结果如下，
+分项结果均从定性与定量两个方面给出评价。
+
+\begin{enumerate}
+  \item \textbf{LLFVW 自动化仿真平台。}
+        基于 8 个 B-Spline 控制点（4 chord + 4 twist, degree=3）参数化生成 22 径向截面螺旋桨几何，
+        以 QBlade SIL 接口（Linux \texttt{.so} / Windows \texttt{.dll}）为求解内核搭建跨平台自动化仿真框架。
+        通过 UIUC 风洞数据库的翼型层（XFoil 251 点，$Re=10^5\sim 3\times 10^5$）与螺旋桨层
+        （APC 10$\times$7，$\text{RPM}\in[4007,6519]$）两级验证，
+        $C_T$、$C_P$、$\eta$ 相对误差均 $\leq 10\%$。
+
+  \item \textbf{MoE 不确定度量化代理模型。}
+        通过 V1 DNN 在分布内 1\% 量级 MAPE 但在 100 几何方法学验证集上观察到 OOD 区域 $FM=1.004$ 虚假最优现象，
+        将代理模型升级为 $K=4$ 混合专家网络（Shared Encoder + Gating + Experts）；
+        采用异方差 NLL 损失实现 $\mu$ 与 $\sigma$ 的同步输出，
+        相比 MC-Dropout 与 Deep Ensemble 在 CMA-ES 嵌套配平的高吞吐场景下具有最优推理效率。
+
+  \item \textbf{CMA-ES 配平嵌套优化。}
+        将开题原 PPO + NSGA-II 路线调整为 CMA-ES + 数据驱动约束（盒约束与 Mahalanobis 分布约束并列设计），
+        新增三轴配平嵌套求解器（同时求解迎角与前后桨转速），
+        通过多初值 $\times 6$ 将配平收敛率由 3\% 提升至 100\%。
+        基于 100 几何方法学验证集，
+        经"算法层 + 约束层 + 不确定度层"三轴消融实验，
+        得到 $FM=0.9469$、$P_{\text{elec}}=362.7$\,W 的方法学演示结果，
+        最终结果将随 1\,000 几何全量数据训练补完。
+
+  \item \textbf{CFD 高保真验证模板。}
+        搭建 Star-CCM+ CFD 验证模板（$\sim 700$ 万网格、$y^+ \in [0,1]$、SST $k$-$\omega$、误差 $\leq 5\%$），
+        在 APC 10$\times$7 基线桨上完成模板对照渲染，
+        验证策略由开题报告中 CFD 主导终验调整为 QBlade LLFVW 同源回验优先、CFD 终验辅助的双层架构，
+        显著提升了优化—验证闭环的迭代效率。
+
+  \item \textbf{数据规模扩展。}
+        完成 LHS 100 几何 $\to$ 1000 几何采样设计与 GPU 加速部署，
+        单几何仿真耗时由 3.5\,h 降至 1.1\,h（3.2$\times$ 提速），
+        全量 42K 样本预计 2026 年 7 月下旬完成。
+\end{enumerate}
+
+\section*{主要创新点}
+
+\begin{enumerate}
+  \item \textbf{螺旋桨外形优化场景下 MoE-$\sigma$ 的 OOD 检测能力实证与优化闭环耦合。}
+        相对于 Wu (2024)\cite{Wu2024} 等使用单 MLP / Kriging 而无可信度输出的工作、
+        以及 Nabian \& Choudhry (2025)\cite{Nabian2025moe} 等在汽车气动场景使用 MoE 但未与外形优化器耦合的工作，
+        本文的方法学贡献在于：
+        (i) 在 100 几何方法学验证集上观察 V1 MLP 在 OOD 区域得到 $FM=1.004$ 的虚假预测、
+        实证 OOD 是螺旋桨外形优化中的真实陷阱；
+        (ii) 在螺旋桨设计变量空间（8 维 B-Spline）上验证 MoE-$\sigma$ 对 OOD 的检测能力；
+        (iii) 将 MoE-$\sigma$ 作为约束源、显式耦合到 CMA-ES 评估流程中，
+        而非停留在代理建模本身。
+
+  \item \textbf{将无人机控制领域成熟的差速配平流程作为算子嵌入外形优化目标函数。}
+        相对于 Klimczyk (2022)\cite{Klimczyk2022} 等仅优化悬停工况、不涉及前飞配平的工作，
+        本文的贡献不在于"提出新的配平方法"——
+        差速配平在四旋翼控制圈是 standard——
+        而在于将其作为算子嵌入到气动外形优化目标函数的评估流程中：
+        每次 CMA-ES 评估都先求解三轴配平 $[\alpha, \Omega_1, \Omega_2]$、
+        再以配平后状态计算功耗，
+        多初值采样 $\times 6$ 实现 100\% 收敛，
+        使优化结果在前飞工况下物理可实现。
+        这一"配平—优化"耦合是\emph{优化目标函数层面的方法学创新}，
+        而非配平算法本身的创新。
+
+  \item \textbf{$\sigma$ 引导的主动补点优化闭环（代码已就绪、待全量数据闭环验证）。}
+        相对于 Tao (2019)\cite{Tao2019} 等假设代理模型全域可靠的工作，
+        本文设计了"优化 $\rightarrow$ $\sigma$ 超阈值 $\rightarrow$ 补采 LLFVW $\rightarrow$ 重训 $\rightarrow$ 再优化"的闭环架构，
+        通过 MoE $\sigma$ 输出主动识别需要补样的搜索区域，
+        在保证可信度的同时维持探索能力。
+        \emph{该闭环目前已完成代码实现与 100 几何方法学验证集上的流水线打通，
+        全量数据上的闭环效果验证将在 1\,000 几何数据完成后展开（详见第~\ref{chap:plan}~章）。}
+\end{enumerate}
+
+\section*{展望}
+
+后续工作将围绕以下方向展开。
+
+\textbf{中期之后、毕业论文前的工作：}
+\begin{itemize}
+  \item \textbf{$\sigma$ 引导的主动学习闭环。}
+        在 1000 几何全量数据完成生成后，
+        启动 $\sigma$ 引导的主动补点循环，
+        在保证训练分布可控扩展的前提下，
+        逐步突破 V4 硬约束的探索边界，
+        探寻全局更优的螺旋桨外形；
+
+  \item \textbf{高保真终验与可视化。}
+        基于 Star-CCM+ 对最终优化解开展非定常 CFD 终验，
+        以 $Q$-criterion、速度切面、压力切面等手段分析尾迹涡结构与桨尖效应，
+        从物理机制上解释优化前后的性能提升来源；
+
+  \item \textbf{V2 MoE 性能指标补完。}
+        基于 1000 几何全量数据完成 MoE 的 MAPE / $R^2$、$\sigma$ 校准曲线、专家利用率热图、OOD 检测 ROC 等四项正交评估，
+        为方法学贡献提供完整证据链。
+\end{itemize}
+
+\textbf{毕业论文之后的延伸方向（受时间所限不在本课题完成）：}
+\begin{itemize}
+  \item \textbf{多保真度融合。}
+        在 LLFVW 与 CFD 之间引入 Co-Kriging 等多保真度融合方法，
+        建立低高保真度数据间的校正模型，
+        进一步压缩 LLFVW 与 CFD 之间的系统性偏差；
+
+  \item \textbf{湍流风场下的鲁棒优化。}
+        在稳态前飞优化收敛后，
+        进一步引入基于 Mann 模型的三维湍流风场扰动，
+        将目标函数改写为风场分布下功耗的期望与方差的加权，
+        形成对城市低空 NTM 工况的鲁棒优化结果。
+        此项工作的方法学准备（CMA-ES + 配平 + MoE $\sigma$）已在本课题中完成，
+        可作为后续研究的直接起点。
+\end{itemize}

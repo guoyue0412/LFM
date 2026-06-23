@@ -1,0 +1,267 @@
+% !TEX root = ../thesis.tex
+
+\chapter{CMA-ES 配平约束嵌套优化}
+\label{chap:optimization}
+
+本章阐述本文采用的优化算法体系，对应开题报告第三项研究任务（T3）。
+本章首先回顾开题报告中规划的 PPO + NSGA-II 路线及其在 V1 代理上的实际效果，
+随后引入 CMA-ES + 数据驱动硬约束作为 V2 优化路线，
+并新增前飞工况下的三轴配平嵌套求解器；
+进一步通过 V1$\to$V4 的四轮迭代结果对比，
+展示从虚假最优到可信优化的演进路径；
+最后阐述 $\sigma$ 引导的主动补点优化闭环。
+
+\section{开题原方案及其在 V1 阶段的对照实验}
+
+开题报告中规划的优化路线为以 PPO 智能体在线调节 NSGA-II 的核心超参数（交叉概率 $p_c$、变异概率 $p_m$、种群规模 $N$），
+状态采用超体积 $HV$、IGD、可行率与适应度方差等度量，
+奖励以 $\Delta HV$ 为主并加入可行率/计算开销惩罚。
+该路线在 V1 DNN 代理上得到 $FM = 0.899$ 与控制点 OOD 越界；
+作为对照，在同一 V1 代理上直接以 CMA-ES 无约束寻优得到 $FM = 1.004$。
+\textbf{两种优化算法均给出 OOD 或物理不可实现解，表明优化算法的差异不能纠正由代理引发的误导}
+（详细诊断见第~\ref{chap:surrogate}~章）。
+本章在此结论之上直接展开新方案，不再展开 PPO + NSGA-II 的细节。
+
+\section{V2 优化方案：CMA-ES 配合数据驱动硬约束}
+
+\subsection{算法路线调整}
+
+考虑到本研究的优化变量数量较少（$D = 8$ 个 B-Spline 控制点），
+且每次评估需要嵌套配平求解器，
+本文将优化路线由 PPO + NSGA-II 调整为 CMA-ES（Covariance Matrix Adaptation Evolution Strategy）+ 数据驱动硬约束。
+CMA-ES 在低-中维度 $D \leq 50$ 范围内表现稳定，
+通过协方差矩阵的自适应学习能够有效地适应目标函数的局部几何结构，
+对于本文的 8 维优化问题具有显著的吞吐与稳定性优势。
+
+\subsection{优化目标}
+
+本文优化目标为最小化巡航工况下的电功率消耗除以巡航速度，
+等价于最大化 Breguet 航程：
+\begin{equation}
+\min_{\mathbf{x}} \;\;f(\mathbf{x}) = \frac{P_{\text{elec}}(\mathbf{x})}{V_{\text{cruise}}},
+\end{equation}
+其中 $\mathbf{x} \in \mathbb{R}^8$ 为 B-Spline 控制点向量，
+$P_{\text{elec}}$ 由配平后的转矩与转速合成。
+
+\subsection{数据驱动约束的两种实现}
+
+为消除 V1 暴露的 OOD 风险，本文设计了两种相互对照的数据驱动约束。
+
+\textbf{方案 (a)：盒约束（box-constraint）。}
+对训练集中所有样本的第 $i$ 维控制点 $x_i^{(s)}$ 计算 $\min$ 与 $\max$，
+作为 CMA-ES 搜索空间的盒约束 $[\hat x_i^-, \hat x_i^+]$。
+该方案实现简单，但仅约束每一维的边界，
+\textbf{并不能阻止角点组合（例如所有 chord 取 min、所有 twist 取 max）落入实际未被采样的 OOD 区域}，
+属于必要不充分的约束。
+
+\textbf{方案 (b)：基于 Mahalanobis 距离的分布约束（推荐方案）。}
+以训练集控制点的样本均值 $\boldsymbol{\mu}_{\text{train}}$ 与协方差 $\boldsymbol{\Sigma}_{\text{train}}$ 估计为基础，
+对候选解 $\mathbf{x}$ 计算 Mahalanobis 距离
+\begin{equation}
+d_{\text{M}}(\mathbf{x}) = \sqrt{(\mathbf{x} - \boldsymbol{\mu}_{\text{train}})^{\top}\,\boldsymbol{\Sigma}_{\text{train}}^{-1}\,(\mathbf{x} - \boldsymbol{\mu}_{\text{train}})},
+\end{equation}
+并施加阈值约束 $d_{\text{M}}(\mathbf{x}) \leq d_\tau$。
+该约束等价于把搜索空间限制在以训练集为中心的椭球区内，
+\textbf{能够同时约束每一维的边界与维度间的协方差结构}，
+避免方案 (a) 的角点 OOD 漏洞。
+阈值 $d_\tau$ 取训练集自身 Mahalanobis 距离的 95\% 分位数。
+
+V3 进一步在分布约束基础上加入 MoE 输出 $\sigma$ 的软惩罚：
+\begin{equation}
+f_{\text{V3}}(\mathbf{x}) = f(\mathbf{x}) + \lambda_\sigma\,\|\boldsymbol{\sigma}(\mathbf{x})\|_2,
+\end{equation}
+在椭球边界附近抑制高 $\sigma$ 区域的搜索；
+V4 改为基于 $\sigma$ 阈值的硬截断（超过阈值的样本被拒绝），
+形成"分布约束 + 不确定度约束"的双层防护，
+彻底消除 OOD 风险。
+
+\section{三轴配平嵌套求解器（开题报告中未规划）}
+
+\subsection{配平方程组}
+
+考虑前后桨差速布局的 X 构型四旋翼无人机，
+飞行平台总质量 $m = 3.5$\,kg、10$''$ 桨、巡航速度 $V_{\text{cruise}} = 10$\,m/s。
+
+\textbf{坐标系约定：}本节配平方程中的 $F_x$、$F_z$、$M_y$ 定义在\emph{机体坐标系}下，
+表示 4 个螺旋桨气动响应经构型矩阵 $\mathbf{B}$ 合成后的机体合力与合力矩；
+区别于第~\ref{chap:surrogate}~章定义在\emph{桨叶坐标系}下的螺旋桨气动量
+$\{T, F_y, Q\}$（推力、法向力、扭矩，作为 MoE 代理模型的输出）。
+
+前飞工况下要求满足机体三轴平衡：
+\begin{equation}
+F_x = 0, \qquad F_z = m\,g, \qquad M_y = 0,
+\end{equation}
+其中 $F_x$、$F_z$ 由 4 个螺旋桨的推力与法向力按构型矩阵合成，
+$M_y$ 由前后桨推力差与几何臂长合成。
+
+\subsection{未知变量与约束范围}
+
+求解未知量 $[\alpha, \Omega_1, \Omega_2]$（迎角、前桨转速、后桨转速），
+约束范围：
+\begin{equation}
+\text{RPM} \in [4\,000,\,6\,500], \qquad \alpha \in [2^\circ,\,8^\circ].
+\end{equation}
+
+\subsection{多初值收敛策略}
+
+V1 采用单初值 Newton 迭代求解配平方程组，受 $M_y$ 解析估算与初值敏感性影响，
+收敛率仅 3\%；
+V2 改用多初值 $\times 6$ 策略，
+将 $[\alpha, \Omega_1, \Omega_2]$ 的网格化初值依次输入并取首个收敛解，
+配平收敛率达到 100\%。
+此外，$M_y$ 由 MoE 直接预测，
+不再使用 $M_y \approx k_m \cdot T \cdot R \cdot \mu$ 的解析估算，
+使配平结果更贴合真实气动响应。
+
+\section{方法学消融实验：三轴拆解 V1$\to$V4}
+\label{sec:ablation}
+
+\textbf{重要说明：}本节结果均基于\emph{100 几何方法学验证集}的代理模型，
+用于验证"算法层 + 约束层 + 不确定度层"三轴中每一层的必要性；
+最终在 1\,000 几何全量数据上的优化结果将随数据生成完成（2026 年 7 月下旬）后补完。
+
+围绕 OOD 外推陷阱的成因诊断，本文将原"V1$\to$V4 踩坑—调整"叙述重构为
+沿\emph{算法层、约束层、不确定度层}三个相互正交维度的消融实验，
+逐项验证每一层在 OOD 防护中的必要性。
+消融配置如表~\ref{tab:v1v4_full}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{方法学消融实验配置（基于 100 几何方法学验证集）}
+\label{tab:v1v4_full}
+\begin{tabular}{llllrr}
+\toprule
+\textbf{配置} & \textbf{算法层} & \textbf{约束层} & \textbf{不确定度层} & \textbf{FM} & \textbf{功率（W）} \\
+\midrule
+V1 (CMA) & CMA-ES & 无 & 无 & 1.004 & 342 \\
+V1 (PPO) & PPO + NSGA-II & 无 & 无 & 0.899 & 382 \\
+V3       & CMA-ES & 软惩罚 $\lambda_\sigma$ & MoE $\sigma$ & 0.941 & 365 \\
+V4       & CMA-ES & 分布约束 + $\sigma$ 截断 & MoE $\sigma$ & \textbf{0.947} & 363 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{算法层消融（V1 CMA vs V1 PPO）：}
+在均无约束、均无不确定度感知的前提下，
+切换优化算法并不能消除虚假最优（CMA 得到 1.004 > 1，PPO 得到 0.899 但控制点同样 OOD），
+验证\textbf{算法差异不是根因}。
+
+\textbf{不确定度层消融（V1 CMA 无 vs V3 软惩罚有）：}
+引入 MoE $\sigma$ 软惩罚后，
+$FM$ 从 1.004 降至 0.941、回归物理可实现区间，
+验证\textbf{不确定度感知是消除虚假最优的必要条件}。
+
+\textbf{约束层消融（V3 软惩罚 vs V4 硬约束）：}
+在同样具有 MoE $\sigma$ 的前提下，
+将软惩罚替换为分布约束 + $\sigma$ 截断后，
+$FM$ 从 0.941 提升至 0.947、收敛稳定性显著提高，
+验证\textbf{显式约束相比软惩罚在工程鲁棒性上更优}。
+
+三轴消融共同证明：\emph{算法、约束、不确定度三层缺一不可}，
+单纯切换优化算法或单纯加约束都无法替代不确定度感知的代理模型。
+
+\subsection{V4 最优解（方法学演示）}
+
+V4 在 100 几何方法学验证集上的最终最优解为
+\begin{equation*}
+FM = 0.9469, \qquad P_{\text{elec}} = 362.7\,\text{W},
+\end{equation*}
+对应的 B-Spline 控制点为
+\begin{align*}
+\text{chord CP} &= [0.0136,\;0.0438,\;0.0198,\;0.0048], \\
+\text{twist CP} &= [37.4^\circ,\;13.5^\circ,\;11.3^\circ,\;8.5^\circ].
+\end{align*}
+该结果作为方法学链路打通的演示，
+最终结果将基于 1\,000 几何全量数据训练的 MoE 重新优化得到。
+
+\subsection{可信度量化：替代"0/44 OOD"的有效指标}
+\label{sec:cred_metric}
+
+由于 V4 的分布约束本身即排除了 OOD 候选，
+单纯报告"0/44 OOD"是约束设计的恒等式而非优化算法的成就。
+为给出有意义的可信度量化，本文采用以下三项替代指标：
+
+\begin{enumerate}
+  \item \textbf{MoE $\sigma$ 相对训练集分位数。}
+        将 V4 最优解处 $\|\boldsymbol{\sigma}(\mathbf{x}^*)\|_2$
+        与训练集所有样本 $\sigma$ 分布的分位数对比，
+        若位于训练集 $\sigma$ 的中位数附近（理想 $\leq$ 50 分位），
+        表明 MoE 对该解的信心与对训练样本相当；
+  \item \textbf{LLFVW 真值回验残差。}
+        对 V4 最优解 $\mathbf{x}^*$ 直接调用 LLFVW 求解器获得真实气动响应 $\mathbf{y}_{\text{true}}$，
+        计算 MoE 预测 $\boldsymbol{\mu}(\mathbf{x}^*)$ 与真值的相对误差
+        $|\mu_j - y_{j,\text{true}}|/|y_{j,\text{true}}|$
+        对每一气动量 $j \in \{T, F_y, M_y, Q\}$ 分别报告；
+        目标为 $\leq 3\%$；
+  \item \textbf{Mahalanobis 距离对训练集 95\% 分位的距离裕度。}
+        $d_{\text{M}}(\mathbf{x}^*) / d_\tau$ 比值越小说明 V4 解越靠近训练分布"舒适区"。
+\end{enumerate}
+
+上述三项指标的初步结果将在 1\,000 几何数据完成后补完，
+目前已就绪指标计算代码与回验流水线。
+
+\subsection{配平残差对代理不确定度的灵敏度}
+
+三轴配平 Newton 迭代依赖 MoE 输出的均值 $\boldsymbol{\mu}$ 求解 $[\alpha, \Omega_1, \Omega_2]$，
+若 $\boldsymbol{\mu}$ 存在偏差 $\delta\boldsymbol{\mu}$，
+则配平解会偏移 $\delta\mathbf{q} \approx -\mathbf{J}^{-1}\,\delta\boldsymbol{\mu}$，
+其中 $\mathbf{J} = \partial\mathbf{r}/\partial\mathbf{q}$ 为配平残差对未知量的 Jacobian。
+\textbf{即代理误差以 Jacobian 逆放大的形式传递到配平解，进而影响 CMA-ES 的目标函数评估。}
+
+为评估该级联误差的实际严重程度，本研究设计如下灵敏度验证流程
+（将在 1\,000 几何数据完成后执行）：
+\begin{enumerate}
+  \item 从 CMA-ES 收敛代群中随机抽取 $\geq 10$ 个候选解；
+  \item 对每个候选解，将 MoE 输出 $\boldsymbol{\mu}$ 替换为 LLFVW 真值，
+        重新求解配平方程组并计算配平解偏移 $\|\delta\mathbf{q}\|$；
+  \item 计算配平解偏移 $\|\delta\mathbf{q}\|$ 与 MoE 输出 $\|\boldsymbol{\sigma}\|$ 的相关系数；
+  \item 若相关系数 $\geq 0.6$，
+        说明 $\boldsymbol{\sigma}$ 是配平偏移的有效预测因子，
+        可作为下一轮"$\sigma$ 大$\Rightarrow$拒绝配平结果"的判据。
+\end{enumerate}
+
+该流程为 V4 之后引入"\emph{不确定度感知配平}（uncertainty-aware trim）"提供经验基础，
+是中期论文的方法学预设而非已完成实验，
+最终结果待 1\,000 几何数据完成后补完。
+
+\section{$\sigma$ 引导的主动补点优化闭环}
+
+V4 的硬约束策略将搜索空间严格限定在训练数据分布内，
+但这会限制优化的探索能力——若全局最优落在当前训练分布之外，
+硬约束将无法触及。
+为此，本文设计了 $\sigma$ 引导的主动补点优化闭环：
+
+\begin{enumerate}
+  \item \textbf{优化阶段：}CMA-ES 在当前训练分布内寻优，
+        每次评估同时记录 MoE 输出的 $\boldsymbol{\sigma}(\mathbf{x})$；
+  \item \textbf{触发判断：}若 CMA-ES 收敛解处的 $\|\boldsymbol{\sigma}\|_2$ 超过预设阈值，
+        或解持续命中硬约束边界，则进入补点阶段；
+  \item \textbf{主动采样：}在高 $\sigma$ 区域选取 $N_{\text{add}}$ 个新候选点，
+        通过 LLFVW 仿真获取真实气动响应；
+  \item \textbf{增量重训：}将新样本合并入训练集，
+        对 MoE 进行增量微调（warm-start，约 500 epochs）；
+  \item \textbf{再优化：}更新硬约束边界，
+        以上一轮 CMA-ES 协方差矩阵作为热启动，
+        继续优化迭代。
+\end{enumerate}
+
+该闭环将优化算法、代理模型与数据生成三者耦合，
+在保证可信度的同时逐步扩展可探索的几何空间。
+结合 GPU 平台 21 几何/天 的吞吐能力，
+每轮闭环约需 3$\sim$5 天补充 60$\sim$100 个高质量样本。
+
+\section{本章小结}
+
+本章首先以 PPO + NSGA-II 与 CMA-ES 在 V1 代理上的对照确认\emph{算法层面}无法解决 OOD 虚假最优问题；
+进而沿"算法层 + 约束层 + 不确定度层"三个正交维度开展消融实验，
+证明三者缺一不可（$\S$~\ref{sec:ablation}）。
+在约束层，本文将盒约束与 Mahalanobis 分布约束并列设计，
+避免单纯盒约束的角点 OOD 漏洞；
+在不确定度层，将 MoE $\boldsymbol{\sigma}$ 同时用于 V3 的软惩罚和 V4 的硬截断；
+新增三轴配平嵌套求解器（多初值 $\times 6$ 使收敛率从 3\% 提升至 100\%），
+并设计了配平残差对 $\sigma$ 灵敏度的实验流程作为下一阶段"不确定度感知配平"的方法学预设。
+基于 100 几何方法学验证集得到 V4 方法学演示结果（$FM = 0.947$、$P_{\text{elec}} = 363\,\text{W}$），
+并设计了 MoE $\sigma$ 分位数、LLFVW 真值回验残差、Mahalanobis 距离裕度三项替代"0/44 OOD"的可信度量化指标；
+最终结果将随 1\,000 几何全量数据训练补完。
+此外，设计了 $\sigma$ 引导的主动补点优化闭环（代码已就绪、待全量数据闭环验证）
+以平衡可信度与探索能力。

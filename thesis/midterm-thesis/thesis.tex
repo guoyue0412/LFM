@@ -1,0 +1,85 @@
+%%=============================================
+% !Mode:: "TeX:UTF-8"
+% !TEX program  = xelatex
+%%=============================================
+% 哈尔滨工业大学（深圳）硕士学位论文 —— 中期论文初稿
+% 课题：基于代理模型的无人机螺旋桨前飞工况气动外形优化
+% 作者：郭跃  学号：24S153206  导师：何晓舟 教授
+% 学院：机器人与先进制造学院  专业：能源动力
+%%=============================================
+
+\documentclass[fontset=fandol,type=master]{hithesisbook}
+
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+
+\setmainfont{Times New Roman}
+\setsansfont{Arial}
+\setCJKmainfont{Songti SC}
+\setCJKsansfont{Heiti SC}
+\setCJKfamilyfont{zhsong}{Songti SC}
+\setCJKfamilyfont{zhhei}{Heiti SC}
+
+\makeatletter
+\renewcommand\normalsize{%
+  \@setfontsize\normalsize{12bp}{15bp}%
+  \abovedisplayskip=8pt
+  \abovedisplayshortskip=8pt
+  \belowdisplayskip=\abovedisplayskip
+  \belowdisplayshortskip=\abovedisplayshortskip}
+\makeatother
+\normalsize
+
+\ctexset{
+  section/format={\heiti\xiaosan},
+  subsection/format={\heiti\sihao},
+  subsubsection/format={\heiti\xiaosi}
+}
+
+\AtBeginEnvironment{table}{\wuhao}
+\AtBeginEnvironment{longtable}{\wuhao}
+
+\graphicspath{{figures/}}
+
+\begin{document}
+
+% 前置部分
+\frontmatter
+
+\input{front/coverbook}
+\makecover
+
+\tableofcontents
+
+% 物理量名称及符号表 (HIT 写作指南 §2.4 / §2.9 要求)
+\input{front/symbols}
+
+% 正文
+\mainmatter
+
+\input{body/chapter01}   % 绪论
+\input{body/chapter02}   % 螺旋桨参数化与 LLFVW 仿真平台
+\input{body/chapter03}   % 代理模型：DNN 到 MoE 的演进
+\input{body/chapter04}   % CMA-ES 配平约束嵌套优化
+\input{body/chapter05}   % CFD 高保真验证模板
+\input{body/chapter06}   % 当前进展与后续工作安排
+
+% 后置部分
+\backmatter
+
+\input{back/conclusion}
+
+\bibliographystyle{hithesis}
+\bibliography{reference}
+
+\input{back/publications}
+\input{back/ai_disclosure}  % AI 生成合成内容标识 (HIT 写作指南 §2.7)
+\input{back/acknowledgements}
+
+\end{document}
+%%=============================================
+
+% Local Variables:
+% TeX-engine: xetex
+% End:

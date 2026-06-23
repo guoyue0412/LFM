@@ -1,0 +1,103 @@
+%%%%%%%%%%%%%%
+\vspace{0.8em}
+\section{前期工作结果}\label{Sec: previous work}
+\vspace{0.8em}
+
+\vspace{0.8em}
+\subsection{螺旋桨低保真度数据的获取}\label{analysis}
+\vspace{0.8em}
+
+叶素动量理论是叶素理论与动量理论的结合，它是一种数学模型简单、物理概念清楚、计算快的理论方法。
+本研究计划采用基于叶素动量理论的QBlade软件\cite{Marten2013QBLADEA}进行螺旋桨气动外形低保真度优化数据的获取。
+
+本研究对QBlade软件的计算准确性进行了初步研究。Qblade软件内置Xfoil进行翼型的空气动力学参数计算。1986年，Mark Drela采用高阶面板法，结合多线程计算的方法开发的开源软件Xfoil\cite{Drela1989XFOI}。Xfoil因使用简单、计算快速，得到了广泛应用\cite{Akram2021}。
+考虑到小型四旋翼无人机的飞行特性，选取SD7032翼型作为研究对象\cite{Liang2022}，翼型几何数据和翼型空气动力学参数的实验数据来自UIUC数据库\cite{Selig1995}。初步探究分为两个部分，分别为翼型几何形状离散点数与空气动力学基本参数的趋势验证。
+
+首先，本研究采用简单的B样条曲线方法，初步探究了150个点、200个点、250个点以及300个点来组成翼型的计算结果的影响，计算雷诺数为61000的条件下攻角与升力系数、阻力系数之间的关系，并于实验数据进行对比，结果如图~\ref{fig:Cd_Cl_60k}所示。从图~\ref{fig:Cd_Cl_60k}中看出四个不同点数目的翼型计算结果几乎重合，但图~\ref{fig:Cd_Cl_60k}中，250点和300点的计算计算结果完全重合。因此，选用250个点来生成翼型的几何模型即可。
+
+
+其次，本研究进行了雷诺数分别为61k，102k，153k条件下的验证实验。SD7032翼型的几何模型采用250个点进行生成，与实验数据的对比结果如图~\ref{fig:Different Re}所示。可以看出，在雷诺数范围从61k到153k的条件下，QBlade都能够很好地得到与实验数据趋势相同地计算结果。同时，计算时间只需要数分钟，和耗时数小时的CFD计算相比非常快且简单，即快速地获取低保真度的翼型空气动力学参数数据。
+
+综上所示，经过初步验证，基于叶素动量理论的QBlade软件适用于本研究的螺旋桨空气动力学参数的快速计算。
+
+\vspace{0.8em}
+\subsection{基于拓扑特征的优化数据分析}\label{topology analysis}
+\vspace{0.8em}
+
+建立代理模型是优化过程中的关键步骤之一，它需要一定数量的实验或仿真计算数据。在优化的过程中也会产生一系列的优化过程数据。通过实验或者计算而来的数据不可避免地存在一些噪声，采用传统的滤波等方法可能会改变数据中极值点的位置，从而导致代理模型不能真实地反映出数据中极值点的位置。因此，本研究创造性地引入拓扑特征来分析数据。
+
+本文基于拓扑特征，对高维数据的分析处理，提出名为持续性数据拓扑（Persistent Data Topology, PDT）的方法。拓扑特征包括极值点的个数、最速下降的轨迹等。图~\ref{fig:PDT_flow_chart}所示为PDT方法的流程图，该方法主要分为三大块，分别为极值点的获取、拓扑性数据降噪处理以及最速下降轨迹的获取。
+在极值点的获取分析中，通过分析数据点与邻近点之间的关系，并通过极小（大）值性、非退化性和凸性三个特征对高维数据中的极值小（大）值点进行定义。在拓扑性的数据降噪中，根据持续同调（topology homology）的思想，并受到Gorban\cite{Gorban2008}的启发，弹性响应模型（Elastic Response Model, ERM）被提出，该方法在数据中增加小的扰动，以使得数据中的最小（大）值点能够持续留存在数据中。
+PDT方法已经过多种不同流动控制、优化问题的数据的检验，如螺旋桨的外形优化数据\cite{WangTY2023}、射流的控制和优化\cite{Noack2023arxiv}数据等，该方法的代码已整理成册\cite{WangTY2023xPDT}。
+
+
+
+\vspace{0.8em}
+\subsubsection{极值点的获取}\label{extrema extraction}
+\vspace{0.8em}
+
+极值点的种类和个数能够描绘数据的高峰点、低峰点位置。通过高等数学知识，我们已经能够识别出一元函数、二元函数的极值点，但是对于离散的高维数据，并没有一个确定的、有效的识别方法。对离散的数据进行拓扑分析能够帮助找到可能的极值点，对认识数据的结构、理解数据中包含的信息十分重要。下面以极小值为例给出不同极值点的定义。
+
+记 $\bm{b}^m \in \mathbb{R}^N$ 是一个$N$数据空间中的一个点。数据集$\mathcal{B} := \left \{ \bm{b}^m\right \}_{m=1}^{M} $是所有数据点的集合, $J^m$是点$\bm{b}^m$的代价函数值。对于数据中的每一个点$\bm{b}^m$，对剩余$M-1$个点到点$\bm{b}^m$的欧式距离进行排序，记$k^m_1$, $\ldots$, $k^m_{M-1} \in \{1, \ldots, M-1\}$为这些邻近点的符号的角标，那么
+\begin{equation}
+\label{Eqn:Neighborhood}
+    \Vert \bm{b}^{k^m_1} - \bm{b}^m \Vert \leq \Vert  \bm{b}^{k^m_2} - \bm{b}^m \Vert  \leq \ldots \leq \Vert  \bm{b}^{k^m_{M-1}} - \bm{b}^m \Vert 
+\end{equation}
+式中， $\Vert \> . \> \Vert$代表欧氏距离。
+第$m$个点的$L^m$的邻近点即为$$\mathcal{B}_{L^m}(\bm{b}^m)= \{\bm{b}^{k^m_1}, \bm{b}^{k^m_2}, \ldots, \bm{b}^{k^m_{L^m}}\}。$$
+
+本研究提出三个条件被用于判定一个点是否为极小值点，并且根据其中的一个条件判定其是否为内部极小值点或单边极小值点。三个条件与极值点种类之间的关系如图\ref{fig:venn diafram}所示。这三个条件分别为：
+\begin{itemize}
+    \item \textbf{Property 1 (minimality):}  
+    $J^{k^m_i} > J^m$, $i=1,\ldots, L^m$, $L^m \ge N+1$;
+   
+    \item \textbf{Property 2 (non-degeneracy):} $L^m$个邻近点能够张成$N$维空间。 
+     \item \textbf{Property 3 (convexity):} 
+    点$\bm{b}^m$被邻近点$\mathcal{B}_{L^{m}}(\bm{b}^m)$在各个方向“包围着”。从数学的角度说即为$\bm{b}^m$可以被邻近点用凸性组合表达式表达：
+\begin{subequations}
+\label{Eqn:ConvexCombination}
+\begin{eqnarray}
+    \bm{b}^m &=& \sum_{i=1}^{L^m} w_l \>\bm{b}^{k^m_i}
+\\ \hbox{with}\quad 0 & \le & w_1, \ldots, w_{L^m}
+\\ \hbox{and} \quad 1 & = & \sum\limits_{i=1}^{L^m} w_i.
+\end{eqnarray}
+\end{subequations}
+\end{itemize} 
+
+
+
+如果点$\bm{b}^m$只满足条件1和条件2，那么称该点为极小值。如果点$\bm{b}^m$只满足条件1和条件2，不满足条件3，那么该点为单边极小值点。单边的定义如图\ref{fig:ConditionC}所示，单边意味着在点$\bm{b}^m$的至少某一维方向上，邻近点只在该点的一边，而不是两边都有，如图\ref{fig:ConditionC}(b)所示。单边可能意味着数据中存在一个洞，也可能是点$\bm{b}^m$在数据空间的边界上。如果一个点$\bm{b}^m$满足上述所有3个条件，则点$\bm{b}^m$被称为内部极小值点。一个内部极小值点如果满足$L^m = M - 1$，则该点为内部最小值点。同理可定义内部极大值点、单边极大值点、内部最大值点、单边最大值点。
+
+
+
+
+\vspace{0.8em}
+\subsubsection{拓扑性数据降噪}\label{Sec:ERM}
+\vspace{0.8em}
+
+拓扑性数据降噪使用的方法是弹性响应模型（Elastic Response Model, ERM），该方法遵循持续新的原理，寻找代价函数值得小$\varepsilon$扰动以减少极值点的个数，即扰动后的数据拓扑机构变得最为简单。扰动的幅值$\varepsilon$越大，扰动后的数据就越简单。ERM方法收到弹性图网得启发~\citep{Gorban2008}，能够解决离散域优化问题的挑战。
+
+首先，对代价函数原始值进行小扰动，记$\{\bm{b}^m,j^m\}_m^M$为``$\varepsilon$-扰动''数据，$j^m$是点$\bm{b}^m$扰动后的代理函数值，
+\begin{equation}
+    |j^m - J^m| \leq \varepsilon.
+    \label{Eq:j_epsilon}
+\end{equation}
+参数$\varepsilon$是引入到数据降噪的最大幅值。被扰动的数据序列记为$(j_n^m)_n$，该序列由ERM迭代求得。原始的代价函数值作为初始值，即
+\begin{equation}
+    j^m_0  = J^m.
+\end{equation}
+对于$n \geq 1$，在第$n$步的扰动代价函数值是被点$\bm{b}^m$的$N+1$邻近点和其距离倒数的加权修正的第$n-1$步的代理函数值，即，
+\begin{align}
+\hat{j}^m_{n+1} & = j^m_n + \cfrac{\mu}{N+1} \sum^{N+1}_{i=1} \cfrac{j^{k^m_i}_n - j^m_n}{\Vert \bm{b}^{k^m_i}-\bm{b}^m \Vert}, \nonumber \\
+j^m_{n+1} & =  \max \left( \min \left( \hat{j}^m_{n+1} , J^m + \varepsilon \right),   J^m-\varepsilon  \right). 
+\end{align}
+系数$\mu$起到平衡拓扑降噪效果与快速收敛的作用。迭代过程的收敛标准为，
+\begin{equation}
+    j^m = \underset{n \rightarrow  \infty}{\rm lim} \> j^m_n.
+\end{equation}
+
+\vspace{0.8em}
+\subsubsection{最速下降轨迹}\label{Sec: trajectory}
+\vspace{0.8em}
+
+最速下降轨迹是从极大值出发，用最速下降法求得的到极小值的过程轨迹，最速上升轨迹可同理得到，即从极小值出发通过最速上升法得到的轨迹。离散域的梯度是其邻近点的线性拟合所得到的梯度，邻近点的个数为$\varphi  M$和$2N$之间的最大，$\varphi$是控制邻近点个数的经验值，通常为0.1。最速下降的学习率为0.001与$0.001/\left \| \nabla J \vert_{\bm{b}=\bm{b}^n} \right \| $之间的最小值，收敛条件通常设为$\left \| \nabla J  \right \| \le 10^{-4}$。

@@ -1,0 +1,189 @@
+% !TEX root = ../thesis.tex
+
+\chapter{螺旋桨参数化与 LLFVW 自动化仿真平台}
+\label{chap:simulation}
+
+本章介绍本研究构建的螺旋桨气动外形参数化方案与基于 LLFVW 的自动化仿真平台，
+对应开题报告中第一项研究任务（T1）。
+本章首先给出基于 B-Spline 的桨叶外形参数化建模方法，
+随后阐述 LLFVW 气动求解器的理论基础与离散形式，
+进而介绍基于 QBlade SIL 接口构建的跨平台自动化仿真框架，
+最后给出基于 UIUC 数据库的翼型层（2D）与螺旋桨层（3D）两级验证结果。
+
+\section{基于 B-Spline 的桨叶外形参数化}
+
+\subsection{B-Spline 曲线表达}
+
+为实现对螺旋桨三维几何外形的可控生成与灵活优化，本研究采用 B-Spline 曲线对叶片关键参数进行参数化建模。
+B-Spline 曲线具有结构表达紧凑、建模精度高、形状可微连续性强等优点，
+特别适用于多段截面结构的连续形变控制。
+通过设定有限数量的控制点，可以对螺旋桨在径向方向上的弦长分布与扭转角分布进行精细调控，
+满足优化算法对输入设计变量维度和形状质量的双重要求。
+
+B-Spline 曲线的一般形式为
+\begin{equation}
+\mathbf{C}(u) = \sum_{i=0}^{n} N_{i,p}(u)\,\mathbf{P}_i,
+\end{equation}
+其中 $\mathbf{C}(u)$ 为曲线在参数 $u$ 处的空间位置向量，$\mathbf{P}_i$ 为第 $i$ 个控制点（Control Point），$u$ 定义在节点向量范围内。
+B-Spline 基函数 $N_{i,p}(u)$ 的递归定义如下：
+\begin{equation}
+N_{i,p}(u) = \frac{u - u_i}{u_{i+p} - u_i} N_{i,p-1}(u) + \frac{u_{i+p+1} - u}{u_{i+p+1} - u_{i+1}} N_{i+1,p-1}(u),
+\end{equation}
+\begin{equation}
+N_{i,0}(u) = \begin{cases} 1, & u_i \leq u < u_{i+1} \\ 0, & \text{otherwise} \end{cases}
+\end{equation}
+其中 $N_{i,p}(u)$ 为 $p$ 次 B-Spline 的第 $i$ 个基函数，$n$ 为控制点个数减一，$p$ 为 B-Spline 曲线的次数（Degree）。
+
+\subsection{控制点设计与 APC 10$\times$7 拟合验证}
+
+为兼顾设计自由度与搜索效率，本研究选取 8 个 B-Spline 控制点（4 个 chord + 4 个 twist），
+通过 degree=3 的 B-Spline 曲线插值生成 22 个径向截面参数，
+最终输出可直接用于螺旋桨气动特性仿真的三维螺旋桨几何模型。
+B-Spline 曲线相比贝塞尔曲线具有更强的局部可控性，
+即对单个控制点的移动仅影响曲线的局部区域，不会对形状产生全局扰动，
+从而在保持几何连续性的同时实现更精细的局部调整能力。
+
+以 APC 10$\times$7 型号螺旋桨为对象开展外形参数化测试，用以验证所提方法的可行性与适用性。
+在径向 $r/R \in [0.15, 1.0]$ 范围内对 baseline 离散控制点进行 B-Spline 拟合，
+拟合得到的弦长曲线 $c/R$ 与扭转角曲线 $\beta$ 在所有径向位置上均能复现原始几何，
+拟合误差可控制在 1\% 量级以内，验证了 B-Spline 参数化在 APC 系列螺旋桨上的工程可用性。
+
+\section{LLFVW 气动求解器}
+
+\subsection{理论模型}
+
+在螺旋桨气动性能分析中，传统的 BEMT 与升力线理论（LLT）虽然计算效率高，
+但在处理非定常来流、螺旋尾迹演化等复杂工况时存在精度瓶颈。
+为突破这一限制，本研究引入基于 LLFVW 的气动模型。
+该方法通过在桨叶四分之一弦线布置升力线，
+显式模拟自由尾迹的三维对流过程，
+结合 Biot-Savart 方程计算任意空间点的诱导速度，
+不仅能够准确捕捉桨尖螺旋涡及尾迹衰减，
+还能保留流场历史信息。
+
+在 LLFVW 中，将叶片等升力面离散为 $N$ 个面板，每个面板上假设存在未知的涡强度 $\Gamma_i$。
+依据 Biot-Savart 定律，涡线元在空间任一点诱导速度满足
+\begin{equation}
+\mathrm{d}\mathbf{V} = \frac{\Gamma}{4\pi}\,\frac{\mathrm{d}\mathbf{l} \times (\mathbf{r} - \mathbf{r}')}{\|\mathbf{r} - \mathbf{r}'\|^3}.
+\end{equation}
+离散后，第 $j$ 个控制点处所有面板涡元对法向速度的贡献可写为
+\begin{equation}
+v_n^{(j)} = \sum_{i=1}^{N} a_{ij} \Gamma_i,
+\end{equation}
+为满足无穿透边界条件（固体表面法向速度为零），施加
+\begin{equation}
+\left(\mathbf{V}_\infty + \sum_{i=1}^{N} a_{ij} \Gamma_i\,\hat{\mathbf{e}}_i\right)\cdot \mathbf{n}_j = 0, \quad j = 1,2,\dots,N.
+\end{equation}
+由此得到 $N \times N$ 的线性方程组：
+\begin{equation}
+\mathbf{A}\,\boldsymbol{\Gamma} = \mathbf{b}, \quad \mathbf{A} = [a_{ij}], \quad \boldsymbol{\Gamma} = [\Gamma_1, \dots, \Gamma_N]^{\top}, \quad \mathbf{b} = -[\mathbf{V}_\infty \cdot \mathbf{n}_1, \dots, \mathbf{V}_\infty \cdot \mathbf{n}_N]^{\top}.
+\end{equation}
+求得 $\Gamma_i$ 后，可用 Kutta--Joukowski 定理求解局部升力：
+\begin{equation}
+L' = \rho\,U_\infty\,\Gamma.
+\end{equation}
+
+上述方程组解出的是\emph{某一瞬时}附着涡涡强分布。
+LLFVW 与传统稳态升力线理论（LLT）的关键区别在于：
+\textbf{尾涡线作为可自由对流的拉格朗日涡元，
+其位置随诱导速度场显式演化，
+而非按预设几何（如螺旋面）固定。}
+具体地，设第 $k$ 个尾涡 marker 在时刻 $t$ 的空间位置为 $\mathbf{x}_k(t)$，
+则其对流方程为
+\begin{equation}
+\frac{\mathrm{d}\mathbf{x}_k}{\mathrm{d}t} = \mathbf{V}_\infty + \sum_{j} \mathbf{V}_{\text{ind}}^{(j)}\!\bigl(\mathbf{x}_k\bigr),
+\label{eq:wake_advection}
+\end{equation}
+其中 $\mathbf{V}_{\text{ind}}^{(j)}$ 是由所有附着涡与已脱落尾涡产生的 Biot--Savart 诱导速度。
+
+时间步推进采用显式或半隐式方案：在每一个时间步 $\Delta t$ 内，
+先求解当前涡强 $\Gamma_i^{n}$（式~(2.4)--(2.6)），
+再以式~(\ref{eq:wake_advection}) 推进所有尾涡 marker 位置至 $t^{n+1}$，
+并在桨叶后缘脱落新的尾涡环（满足 Kelvin 定理：附着环量变化等于脱落涡环量的负值）。
+本研究采用 3$^\circ$/步 的桨叶旋转角增量、共 1\,000 步推进，
+取后 120 步进行周期平均以消除瞬态影响。
+
+该自由对流的尾迹结构使 LLFVW 能够\emph{显式解析桨尖螺旋涡的卷起、衰减与桨叶—尾迹自感应}，
+是其相比 LLT 与 BEMT 在前飞、阵风、桨—桨干扰等非定常工况下精度提升的物理来源。
+LLFVW 气动数值仿真方法将复杂流动简化为线性方程组的数值求解 + 拉格朗日尾迹对流，
+计算效率显著高于 CFD，适用于代理建模所需的大规模批量样本生成；
+但忽略黏性与分离效应，需结合高保真 CFD 进行校核与修正（详见第~\ref{chap:wind_cfd}~章）。
+
+\subsection{性能参数定义}
+
+翼型的空气动力学性能通常以升力系数 $C_l$ 与阻力系数 $C_d$ 作为评价指标：
+\begin{equation}
+C_l = \frac{L}{\tfrac{1}{2}\rho U_\infty^2 S}, \qquad C_d = \frac{D}{\tfrac{1}{2}\rho U_\infty^2 S},
+\end{equation}
+其中 $\rho$ 为空气密度（kg/m$^3$），$L$、$D$ 分别为升力与阻力（N），$U_\infty$ 为自由来流速度（m/s），$S$ 为参考面积（m$^2$）。
+
+对于螺旋桨气动性能的刻画，通常以推力系数 $C_T$、功率系数 $C_P$ 以及推进效率 $\eta$ 作为评价指标：
+\begin{equation}
+C_T = \frac{T}{\rho n^2 d^4}, \qquad C_P = \frac{P}{\rho n^3 d^5}, \qquad \eta = \frac{U_\infty}{n d}\,\frac{C_T}{C_P} = J\,\frac{C_T}{C_P},
+\end{equation}
+其中 $T$、$P$ 分别为螺旋桨产生的总推力（N）与功率（W），$n$ 为转速（rps），$d$ 为螺旋桨直径（m），$J$ 为前进比。
+
+\section{自动化仿真框架}
+
+为实现大规模样本的高效计算，本研究基于 Python 编写了自动化仿真框架，
+用于调用 QBlade Community Edition v2.0.8.6 的 LLFVW 求解器。
+该模块可在不同系统环境下（Ubuntu 调用 \texttt{.so} 库，Windows 调用 \texttt{.dll} 库）自动执行几何更新、仿真文件生成、仿真运行与结果提取等操作。
+同时输出序列数据（用于捕捉非定常流动特性）与周期平均数据（用于稳态性能评估），
+保证数据集既具备时域信息又具备整体气动指标。
+该模块实现了以下功能：
+\begin{enumerate}
+  \item \textbf{参数化建模}：根据控制点（弦长分布、扭转角等）自动生成螺旋桨几何；
+  \item \textbf{批量工况设置}：根据指定转速、前进比及攻角范围自动生成输入文件；
+  \item \textbf{结果解析与存储}：提取 $C_T$、$C_P$、$\eta$ 等关键性能指标，自动存储为结构化数据；
+  \item \textbf{即时落盘}：采用 \texttt{batch-size}=1 的策略，每个几何完成后立即将结果序列化为 pkl 文件，避免长周期作业中断丢失。
+\end{enumerate}
+
+通过该模块，可在无需人工干预的条件下完成大规模仿真数据的自动化处理，
+形成几何设计—自动化仿真—数据采集—代理建模的一体化集成。
+
+\section{基于 UIUC 数据库的两级验证}
+
+本研究基于伊利诺伊大学厄巴纳分校（University of Illinois at Urbana-Champaign, UIUC）提供的开源数据集\cite{Dantsker2022,Abbott1945}，
+采用误差度量与统计检验相结合的方式对模型的准确性进行验证。
+通过由局部到整体的两级递进确保模型的物理可靠性。
+第一阶段为翼型（Airfoil）验证：利用 XFoil 二维翼型设计与分析模块结合 360$^\circ$ 极曲线外推技术，生成覆盖全攻角范围的翼型气动数据库；
+第二阶段为螺旋桨（Propeller）级验证：将已验证的翼型气动数据作为输入，构建开源螺旋桨三维几何，并在 LLFVW 框架下进行非定常流场模拟，
+通过显式追踪桨叶尾迹涡元获取气动特性数据。
+
+\subsection{翼型层级验证（2D）}
+
+QBlade 软件内置 XFoil 进行翼型空气动力学参数计算。
+考虑到小型四旋翼无人机的飞行特性，选取 E374 与 NACA6409 为翼型验证对象。
+基于不同点数（100、150、200、251 与 291 个点）生成翼型几何，
+在 $Re = 100\,900$ 的条件下计算 $C_l$ 与 $C_d$ 随攻角的变化规律。
+当点数超过 200 时计算结果已经趋于收敛；
+而在点数过大的情况下，升力曲线在大攻角区域出现了震荡现象。
+综合考虑计算效率与数值精度，最终选用 251 个点作为翼型建模的标准网格划分。
+
+为验证计算结果的准确性，本研究选择在不同雷诺数条件下（$Re = 10^5 \sim 3 \times 10^5$）对其进行了数值模拟。
+所得升力曲线 $C_l(\alpha)$ 与阻力曲线 $C_d(\alpha)$ 与 UIUC 风洞数据库中的实验数据进行对比，
+在小攻角区域（$\alpha < 10^\circ$）数值模拟与实验结果具有良好一致性；
+在大攻角区域数值模拟能够正确捕捉失速点及升力平台区的特征。
+阻力系数的预测则在中低雷诺数条件下略高于实验值，但整体趋势吻合良好。
+
+\subsection{螺旋桨层级验证（3D）}
+
+本研究针对 APC 10$\times$7 螺旋桨开展三维数值模拟，以验证所提 LLFVW 方法在低雷诺数下的适用性与精度。
+在三维非定常气动模拟中，螺旋桨性能系数的收敛性是判断时间分辨率合理性的重要标准。
+若不同时间步长下计算得到的 $C_T$ 与 $C_P$ 曲线变化规律基本一致，且与实验数据吻合，则表明模型已达到网格无关性和时间收敛性。
+
+针对 $\text{RPM} = 4007$、$J = 0.432$ 工况作为模拟对象，对比其性能参数曲线，
+当时间步长取 3$^\circ$/步、每步迭代 1000 次时，推力系数与功率系数的变化曲线已基本收敛，且计算效率与精度达到良好平衡。
+为验证螺旋桨气动模型的准确性，以 APC 10$\times$7 螺旋桨为对象，
+在 $\text{RPM} \in [4007, 6519]$、$J \in [0, 0.65]$ 的工况下模拟气动特性，
+并与 UIUC 风洞共 140 组实验数据进行对比，
+在上述范围内推力系数 $C_T$、功率系数 $C_P$ 与推进效率 $\eta$ 的差异均 $\leq 10\%$，
+验证了该三维模型在中低雷诺数下预测螺旋桨气动特性的可靠性。
+
+\section{本章小结}
+
+本章介绍了基于 B-Spline 的 8 控制点参数化方案（4 chord + 4 twist, degree=3 $\to$ 22 径向截面），
+以及基于 QBlade SIL 接口构建的自动化 LLFVW 仿真框架。
+通过 UIUC 数据库的两级验证（翼型级 251 点 + 螺旋桨级 140 工况），
+LLFVW 求解器在巡航工况下相对实验数据的最大误差 $\leq 10\%$，
+为后续的代理模型训练与优化迭代提供了可靠的低成本高保真度数据源。

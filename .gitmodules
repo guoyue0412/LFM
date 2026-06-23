@@ -1,0 +1,7 @@
+[submodule "Propeller_project-main"]
+	path = code/Propeller_project-main
+	url = https://github.com/guoyue0412/Propeller_project_linux_version.git
+	branch = guoyue0412-Linux_version
+[submodule "code/Propeller_project-main"]
+	path = code/Propeller_project-main
+	url = https://github.com/guoyue0412/Propeller_project_linux_version.git

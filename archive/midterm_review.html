@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>基于代理模型的复杂风场内无人机螺旋桨气动外形优化 — 中期汇报</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
+
+  :root {
+    --navy: #0B1D3A;
+    --navy-light: #132B50;
+    --teal: #00BFA5;
+    --teal-dim: rgba(0,191,165,0.15);
+    --orange: #FF6D00;
+    --orange-dim: rgba(255,109,0,0.15);
+    --ice: #E3F2FD;
+    --white: #FFFFFF;
+    --gray: #90A4AE;
+    --red: #FF5252;
+    --green: #69F0AE;
+    --yellow: #FFD740;
+    --blue: #448AFF;
+    --blue-dim: rgba(68,138,255,0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--navy);
+    color: var(--white);
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  .deck { width: 100%; height: 100%; position: relative; }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 56px 72px;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+  .slide.active { display: flex; opacity: 1; }
+
+  .nav {
+    position: fixed; bottom: 28px; right: 36px; z-index: 100;
+    display: flex; gap: 10px; align-items: center;
+  }
+  .nav button {
+    width: 40px; height: 40px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.3);
+    background: rgba(255,255,255,0.08); color: var(--white); font-size: 18px;
+    cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .nav button:hover { background: var(--teal); border-color: var(--teal); }
+  .nav .counter { font-size: 13px; color: var(--gray); min-width: 56px; text-align: center; }
+
+  .progress-bar {
+    position: fixed; top: 0; left: 0; height: 3px; background: var(--teal);
+    transition: width 0.4s ease; z-index: 100;
+  }
+
+  .slide-number {
+    position: absolute; top: 28px; right: 36px;
+    font-size: 12px; color: var(--gray); letter-spacing: 2px;
+  }
+
+  .tag {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    font-size: 11px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase;
+  }
+  .tag-teal { background: var(--teal-dim); color: var(--teal); }
+  .tag-orange { background: var(--orange-dim); color: var(--orange); }
+  .tag-blue { background: var(--blue-dim); color: var(--blue); }
+
+  h1 { font-size: 44px; font-weight: 900; line-height: 1.2; margin-bottom: 14px; }
+  h2 { font-size: 32px; font-weight: 700; line-height: 1.3; margin-bottom: 20px; }
+  h3 { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
+
+  .subtitle { font-size: 18px; color: var(--gray); font-weight: 300; }
+  .accent { color: var(--teal); }
+  .accent-orange { color: var(--orange); }
+  .accent-blue { color: var(--blue); }
+
+  .card-grid { display: grid; gap: 16px; flex: 1; }
+  .card-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+  .card-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .card-grid.cols-4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+  .card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 22px;
+    transition: transform 0.2s;
+  }
+  .card:hover { transform: translateY(-2px); }
+  .card-icon { font-size: 28px; margin-bottom: 10px; }
+  .card h3 { font-size: 16px; margin-bottom: 6px; }
+  .card p { font-size: 13px; color: var(--gray); line-height: 1.6; }
+
+  .card-highlight {
+    border-color: var(--teal);
+    background: linear-gradient(135deg, rgba(0,191,165,0.08), rgba(0,191,165,0.02));
+  }
+  .card-warn {
+    border-color: var(--orange);
+    background: linear-gradient(135deg, rgba(255,109,0,0.08), rgba(255,109,0,0.02));
+  }
+
+  .table-wrap { overflow: auto; flex: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left; padding: 12px 14px;
+    background: rgba(255,255,255,0.06); color: var(--teal);
+    font-weight: 500; font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+    border-bottom: 2px solid rgba(0,191,165,0.3);
+  }
+  td {
+    padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.06);
+    vertical-align: top;
+  }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  .stat-row { display: flex; gap: 32px; margin: 16px 0; }
+  .stat { text-align: center; }
+  .stat-value { font-size: 48px; font-weight: 900; line-height: 1; }
+  .stat-label { font-size: 12px; color: var(--gray); margin-top: 6px; letter-spacing: 1px; }
+
+  .timeline { position: relative; padding-left: 36px; flex: 1; overflow-y: auto; }
+  .timeline::before {
+    content: ''; position: absolute; left: 12px; top: 0; bottom: 0;
+    width: 2px; background: rgba(255,255,255,0.1);
+  }
+  .tl-item { position: relative; margin-bottom: 18px; }
+  .tl-dot {
+    position: absolute; left: -30px; top: 4px; width: 10px; height: 10px;
+    border-radius: 50%; border: 2px solid var(--teal);
+  }
+  .tl-dot.done { background: var(--teal); }
+  .tl-dot.active { background: var(--orange); border-color: var(--orange); box-shadow: 0 0 8px var(--orange); }
+  .tl-dot.pending { background: transparent; border-color: var(--gray); }
+  .tl-date { font-size: 11px; color: var(--gray); margin-bottom: 3px; }
+  .tl-title { font-size: 15px; font-weight: 500; }
+  .tl-desc { font-size: 12px; color: var(--gray); margin-top: 3px; line-height: 1.5; }
+
+  .flow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+  .flow-box {
+    padding: 12px 20px; border-radius: 10px; font-size: 13px; font-weight: 500;
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+    text-align: center; min-width: 110px;
+  }
+  .flow-box.highlight { border-color: var(--teal); background: var(--teal-dim); color: var(--teal); }
+  .flow-box.warning { border-color: var(--orange); background: var(--orange-dim); color: var(--orange); }
+  .flow-box.old { border-color: var(--gray); opacity: 0.5; text-decoration: line-through; }
+  .flow-arrow { color: var(--gray); font-size: 18px; }
+
+  .split { display: flex; gap: 40px; flex: 1; }
+  .split > .left { flex: 1; }
+  .split > .right { flex: 1; }
+
+  .bar-group { margin-bottom: 14px; }
+  .bar-label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+  .bar-track { height: 7px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
+  .bar-fill.teal { background: var(--teal); }
+  .bar-fill.orange { background: var(--orange); }
+  .bar-fill.green { background: var(--green); }
+
+  .check-list { list-style: none; }
+  .check-list li {
+    padding: 6px 0; font-size: 14px; display: flex; align-items: flex-start; gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .check-list .icon { flex-shrink: 0; width: 18px; text-align: center; }
+
+  .cover { justify-content: center; align-items: center; text-align: center; }
+  .cover h1 { font-size: 48px; }
+  .cover .subtitle { font-size: 20px; margin-top: 12px; }
+  .cover .meta { margin-top: 36px; font-size: 14px; color: var(--gray); }
+
+  .bg-pattern {
+    position: absolute; top: -100px; right: -100px;
+    width: 500px; height: 500px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(0,191,165,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .divider { width: 50px; height: 3px; background: var(--teal); margin: 16px 0; border-radius: 2px; }
+
+  .key-hint {
+    position: fixed; bottom: 32px; left: 36px;
+    font-size: 11px; color: rgba(255,255,255,0.2);
+  }
+
+  .compare-arrow {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 28px; color: var(--orange); padding: 0 8px;
+  }
+
+  .mini-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
+  }
+  .mini-tag.done { background: rgba(105,240,174,0.15); color: var(--green); }
+  .mini-tag.wip { background: rgba(255,109,0,0.15); color: var(--orange); }
+  .mini-tag.todo { background: rgba(144,164,174,0.15); color: var(--gray); }
+  .mini-tag.changed { background: rgba(68,138,255,0.15); color: var(--blue); }
+</style>
+</head>
+<body>
+
+<div class="progress-bar" id="progressBar"></div>
+
+<div class="deck" id="deck">
+
+<!-- ============================================================ -->
+<!-- SLIDE 0: 封面 -->
+<!-- ============================================================ -->
+<div class="slide cover active">
+  <div class="bg-pattern"></div>
+  <span class="tag tag-teal" style="margin-bottom:20px">哈尔滨工业大学（深圳） · 硕士学位论文中期检查</span>
+  <h1 style="font-size:42px">基于代理模型的复杂风场内<br><span class="accent">无人机螺旋桨气动外形优化</span></h1>
+  <p class="subtitle" style="margin-top:16px; font-size:16px; max-width:700px; line-height:1.6">
+    LLFVW 高保真仿真 → MoE 代理模型 → CMA-ES 配平约束优化
+  </p>
+  <div class="meta">
+    <p>答辩人：郭跃 &nbsp;|&nbsp; 学号：24S153206</p>
+    <p style="margin-top:6px">指导教师：何晓舟 教授 &nbsp;|&nbsp; 机器人与先进制造学院 · 能源动力</p>
+    <p style="margin-top:6px">深圳市科技重大专项 KJZD20230923115210021</p>
+    <p style="margin-top:12px; color:var(--teal)">2026 年 6 月</p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 1: 汇报提纲 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">01</div>
+  <h2>汇报提纲</h2>
+  <div class="divider"></div>
+  <div class="card-grid cols-2" style="margin-top:16px">
+    <div class="card">
+      <div class="card-icon">1</div>
+      <h3>研究背景与开题方案回顾</h3>
+      <p>问题定义、四项研究任务、原计划技术路线</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">2</div>
+      <h3>已完成工作（一）：仿真平台</h3>
+      <p>B-Spline 参数化、LLFVW 气动模型、UIUC 验证、自动化仿真流程</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">3</div>
+      <h3>已完成工作（二）：代理模型与优化</h3>
+      <p>DNN→MoE 演进、V1→V4 迭代、OOD 发现、配平约束</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">4</div>
+      <h3>已完成工作（三）：辅助模块</h3>
+      <p>Mann 复杂风场建模、CFD (Star-CCM+) 验证模板</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">5</div>
+      <h3>当前进展与数据扩展</h3>
+      <p>1000 几何 LLFVW 仿真、GPU 加速策略、进度</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">6</div>
+      <h3>进度对比与后续计划</h3>
+      <p>开题计划 vs 实际执行、方法演变说明、剩余工作</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 2: 研究背景 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">02</div>
+  <span class="tag tag-teal">一、研究背景</span>
+  <h2 style="margin-top:12px">复杂风场内无人机螺旋桨<span class="accent">气动外形优化</span></h2>
+  <div class="split" style="margin-top:16px">
+    <div class="left">
+      <h3 style="color:var(--teal); font-size:16px">研究问题</h3>
+      <ul class="check-list">
+        <li><span class="icon">1</span> 城市低空复杂湍流环境下，四旋翼前飞时桨叶承受<strong>非轴向来流</strong>，气动效率远低于悬停设计点</li>
+        <li><span class="icon">2</span> 传统 BEMT/CFD 方法耗时大，难以高效探索参数空间</li>
+        <li><span class="icon">3</span> 前后桨<strong>差速配平</strong>引入强耦合约束，现有研究多忽略</li>
+        <li><span class="icon">4</span> 已有文献集中于悬停工况优化，前飞巡航工况优化稀缺</li>
+      </ul>
+      <div class="divider" style="margin-top:16px"></div>
+      <h3 style="color:var(--teal); font-size:16px; margin-top:12px">优化目标</h3>
+      <p style="font-size:16px; line-height:1.8">
+        最小化单位距离电能消耗 <strong class="accent">min P<sub>elec</sub>/V</strong><br>
+        <span style="font-size:13px; color:var(--gray)">等价于最大化 Breguet 航程，综合考量推力效率与功耗</span>
+      </p>
+    </div>
+    <div class="right">
+      <div class="card card-highlight" style="margin-bottom:14px">
+        <h3>开题四项研究任务</h3>
+        <table style="margin-top:6px; font-size:13px">
+          <tr><td style="color:var(--teal); font-weight:600; width:30px">T1</td><td>LLFVW 高保真仿真数据生成</td></tr>
+          <tr><td style="color:var(--teal); font-weight:600">T2</td><td>DNN 气动代理模型构建</td></tr>
+          <tr><td style="color:var(--teal); font-weight:600">T3</td><td>PPO 在线调参 NSGA-II 多目标优化</td></tr>
+          <tr><td style="color:var(--teal); font-weight:600">T4</td><td>CFD 高保真验证与可视化分析</td></tr>
+        </table>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <h3>设计变量</h3>
+        <p style="font-size:14px; margin-top:6px; color:var(--white)">
+          <strong>8 个 B-Spline 控制点</strong> (4 chord + 4 twist)<br>
+          degree=3 → 22 径向截面分布<br>
+          APC 10×7 为基准桨
+        </p>
+      </div>
+      <div class="card">
+        <h3>无人机平台</h3>
+        <p style="font-size:13px; margin-top:6px; color:var(--white)">
+          质量 3.5 kg · 10" 桨 · V<sub>cruise</sub> = 10 m/s · 前后对称 X 构型
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 3: 开题方案 vs 实际演进 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">03</div>
+  <span class="tag tag-blue">方案演变</span>
+  <h2 style="margin-top:12px">开题技术路线 → <span class="accent">实际演进</span></h2>
+
+  <div style="margin-top:20px">
+    <h3 style="font-size:14px; color:var(--gray); margin-bottom:10px">开题方案（2024.09）</h3>
+    <div class="flow" style="justify-content:center">
+      <div class="flow-box old" style="min-width:140px">
+        LLFVW 仿真<br><span style="font-size:11px">100 几何</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box old" style="min-width:140px">
+        单 MLP DNN<br><span style="font-size:11px">代理模型</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box old" style="min-width:160px">
+        PPO 调参 NSGA-II<br><span style="font-size:11px">多目标优化</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box old" style="min-width:140px">
+        Star-CCM+ CFD<br><span style="font-size:11px">高保真验证</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="compare-arrow">↓ 发现 OOD 外推陷阱 → 方法迭代 ↓</div>
+
+  <div>
+    <h3 style="font-size:14px; color:var(--teal); margin-bottom:10px">实际方案（V2 管线）</h3>
+    <div class="flow" style="justify-content:center">
+      <div class="flow-box highlight" style="min-width:140px">
+        LLFVW 仿真<br><span style="font-size:11px; color:var(--gray)"><strong>1000</strong> 几何 ×42 工况</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box highlight" style="min-width:140px">
+        <strong>MoE</strong> 代理模型<br><span style="font-size:11px; color:var(--gray)">μ + σ 不确定度</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box highlight" style="min-width:160px">
+        <strong>CMA-ES</strong> + 配平约束<br><span style="font-size:11px; color:var(--gray)">三轴平衡 + OOD 防护</span>
+      </div>
+      <span class="flow-arrow">→</span>
+      <div class="flow-box highlight" style="min-width:140px">
+        <strong>QBlade</strong> LLFVW<br><span style="font-size:11px; color:var(--gray)">回验 + 可视化</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-grid cols-3" style="margin-top:20px">
+    <div class="card card-warn">
+      <h3 style="color:var(--orange)">变更一：代理模型升级</h3>
+      <p style="margin-top:6px">
+        单 MLP → <strong>Mixture of Experts (K=4)</strong><br>
+        新增不确定度输出 σ（异方差 NLL 损失）<br>
+        M<sub>y</sub> 从解析估算改为直接预测
+      </p>
+    </div>
+    <div class="card card-warn">
+      <h3 style="color:var(--orange)">变更二：优化算法</h3>
+      <p style="margin-top:6px">
+        PPO+NSGA-II → <strong>CMA-ES</strong><br>
+        证据：PPO (4 并行 env, 200K steps) FM=0.899 且 OOD 不可控<br>
+        CMA-ES V4 硬约束 FM=0.947 · 0/44 OOD · 全部可信<br>
+        新增三轴配平 + 数据驱动硬约束
+      </p>
+    </div>
+    <div class="card card-warn">
+      <h3 style="color:var(--orange)">变更三：验证策略</h3>
+      <p style="margin-top:6px">
+        CFD 终验 → <strong>QBlade LLFVW 回验优先</strong><br>
+        与仿真数据同源，快速闭环验证<br>
+        CFD 作为辅助高保真验证
+      </p>
+    </div>
+  </div>
+
+  <div style="margin-top:14px; padding:12px 20px; background:rgba(255,109,0,0.06); border-radius:10px; border:1px solid rgba(255,109,0,0.2)">
+    <p style="font-size:12px; color:var(--white)">
+      <strong class="accent-orange">变更驱动链：</strong>
+      V1 CMA-ES FM=1.004 (不可信) → 诊断: 84% 截面 OOD + RPM 超限 +1455 → V3 OOD 软惩罚仍泄漏 34% → V4 硬约束 0% OOD 但 8/8 CP 卡边界
+      → <strong>结论：</strong>100 几何可信域太窄 + 单 MLP 无不确定度感知 → <strong>方案升级：</strong>MoE(σ) + 1000 几何 + CMA-ES 配平约束
+    </p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 4: 已完成工作一 — 仿真平台 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">04</div>
+  <span class="tag tag-teal">已完成工作（一）</span>
+  <h2 style="margin-top:12px">LLFVW 仿真平台搭建 <span class="mini-tag done">已完成</span></h2>
+  <p class="subtitle" style="font-size:14px; margin-bottom:16px">对应开题任务 T1：LLFVW 高保真仿真数据生成</p>
+
+  <div class="split">
+    <div class="left">
+      <div class="card" style="margin-bottom:12px">
+        <h3>B-Spline 参数化建模</h3>
+        <p style="margin-top:6px; color:var(--white); font-size:13px">
+          8 个控制点 (4 chord + 4 twist)，degree=3<br>
+          → 22 径向截面 → 三维螺旋桨几何<br>
+          APC 10×7 拟合验证通过
+        </p>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <h3>LLFVW 气动理论</h3>
+        <p style="margin-top:6px; color:var(--white); font-size:13px">
+          Biot-Savart 诱导速度 + 无穿透边界条件<br>
+          N×N 线性方程组 → Kutta-Joukowski 定理<br>
+          1000 时间步 + 后 120 步周期平均
+        </p>
+      </div>
+      <div class="card">
+        <h3>自动化仿真框架</h3>
+        <p style="margin-top:6px; color:var(--white); font-size:13px">
+          Python 驱动 QBlade SIL (.so/.dll)<br>
+          跨平台：Ubuntu (GPU) + Windows<br>
+          批量 .sim 生成 → 仿真 → 结果提取 → 入库<br>
+          逐几何即时保存 (batch-size=1)
+        </p>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card card-highlight" style="margin-bottom:12px">
+        <h3>UIUC 两级验证 (Dantsker et al. 2022)</h3>
+        <table style="margin-top:6px; font-size:13px">
+          <tr>
+            <td style="color:var(--teal); font-weight:600; width:80px">翼型 (2D)</td>
+            <td>E374 / NACA6409 · XFoil 251 点网格<br>Re=10⁵~3×10⁵ · 小攻角区 (α&lt;10°) C<sub>l</sub>,C<sub>d</sub> 一致<br>大攻角区正确捕捉失速点与升力平台区</td>
+          </tr>
+          <tr>
+            <td style="color:var(--teal); font-weight:600">螺旋桨 (3D)</td>
+            <td>APC 10×7 · RPM∈[4007,6519] · J∈[0,0.65]<br>C<sub>T</sub>, C<sub>P</sub>, η 相对差异均 <strong>≤10%</strong><br>140 组工况与 UIUC 风洞数据对照</td>
+          </tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>网格收敛性验证</h3>
+        <p style="margin-top:6px; color:var(--white); font-size:13px">
+          翼型：251 个点为标准网格划分<br>
+          螺旋桨：3°/步 · 1000 步迭代 → 收敛<br>
+          时间分辨率与网格无关性均满足
+        </p>
+      </div>
+      <div style="margin-top:12px">
+        <div class="stat-row" style="justify-content:space-around">
+          <div class="stat">
+            <div class="stat-value accent" style="font-size:36px">100</div>
+            <div class="stat-label">V1 几何</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value accent-orange" style="font-size:36px">→ 1000</div>
+            <div class="stat-label">V2 扩展</div>
+          </div>
+          <div class="stat">
+            <div class="stat-value accent" style="font-size:36px">42</div>
+            <div class="stat-label">工况/几何</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 5: 已完成工作二 — 代理模型 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">05</div>
+  <span class="tag tag-teal">已完成工作（二）</span>
+  <h2 style="margin-top:12px">代理模型：DNN → <span class="accent">MoE 演进</span> <span class="mini-tag done">已完成</span></h2>
+  <p class="subtitle" style="font-size:14px; margin-bottom:12px">对应开题任务 T2：DNN 气动代理模型构建 → 实际升级为 MoE 架构</p>
+
+  <div class="split">
+    <div class="left">
+      <div class="card" style="margin-bottom:12px; border-color:var(--gray); opacity:0.7">
+        <h3 style="color:var(--gray)">V1 实现：单 MLP DNN</h3>
+        <p style="margin-top:6px; font-size:13px">
+          输入 47 维 (3 工况 + 22×chord + 22×twist)<br>
+          隐藏层 [64, 128, 64] · ReLU · Dropout 0.001<br>
+          输出：F<sub>x</sub>, F<sub>y</sub>, F<sub>z</sub>, Torque<br>
+          MSE 损失 · Adam · CosineAnnealingLR · 5000 epochs<br>
+          <strong>100 几何 × 72 工况 = 7200 样本</strong> (train:test = 9:1)<br>
+          <span style="color:var(--green)">F<sub>x</sub> MAPE 1.03% · F<sub>z</sub> 1.50% · Torque 0.99%</span>
+        </p>
+      </div>
+      <div class="card card-warn" style="margin-bottom:12px">
+        <h3 style="color:var(--orange)">问题：分布内精度高 ≠ 外推可靠</h3>
+        <p style="margin-top:6px; font-size:13px">
+          CMA-ES 无约束优化 → FM=1.004（<strong>物理不可能</strong>）<br>
+          证据：twist 100% 截面 OOD, chord 68% 截面 OOD<br>
+          RPM 外推 +1455（超出 [4000,6500] 范围）<br>
+          PPO 同样受影响：FM=0.899 但 OOD 仍不可控<br>
+          <strong>→ 核心问题不在优化算法，而在代理模型缺乏可信度感知</strong>
+        </p>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card card-highlight">
+        <h3 style="color:var(--teal)">实际方案：MoE 代理模型 (V2)</h3>
+        <p style="margin-top:6px; font-size:13px; color:var(--white)">
+          <strong>Shared Encoder</strong> 47→64 (BatchNorm + ReLU)<br>
+          <strong>Gating Network</strong> 64→K (softmax 权重)<br>
+          <strong>K=4 Experts</strong> 各 64→128→8 [μ₄ + log_σ₄]<br>
+          <strong>输出：</strong>[T, H, M<sub>y</sub>, Q] + [σ<sub>T</sub>, σ<sub>H</sub>, σ<sub>My</sub>, σ<sub>Q</sub>]
+        </p>
+        <div style="margin-top:10px; padding-top:10px; border-top:1px solid rgba(255,255,255,0.1)">
+          <p style="font-size:12px; color:var(--teal)">相比 DNN 的核心改进：</p>
+          <ul class="check-list" style="margin-top:4px">
+            <li style="font-size:12px"><span class="icon" style="color:var(--teal)">+</span> 异方差 NLL 损失 → 自动学习预测不确定度</li>
+            <li style="font-size:12px"><span class="icon" style="color:var(--teal)">+</span> M<sub>y</sub> 直接预测（不再解析估算）</li>
+            <li style="font-size:12px"><span class="icon" style="color:var(--teal)">+</span> 混合方差 σ² = Σπ<sub>k</sub>(σ<sub>k</sub>² + μ<sub>k</sub>²) − μ²</li>
+            <li style="font-size:12px"><span class="icon" style="color:var(--teal)">+</span> Balance + 熵正则化防 expert 坍缩</li>
+            <li style="font-size:12px"><span class="icon" style="color:var(--teal)">+</span> 输入维度 11→47（含 22 截面分布）</li>
+          </ul>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h3>为什么选 MoE 而非 MC-Dropout / Ensemble？</h3>
+        <p style="font-size:12px; margin-top:4px; color:var(--white)">
+          ① <strong>单次前向</strong>同时获得 μ+σ，CMA-ES 每代评估 16×200 次，推理成本敏感<br>
+          ② Gating 天然适配多工况分区 (低/高 RPM, 小/大攻角)<br>
+          ③ 异方差 NLL 学出<strong>输入相关</strong>的 σ（非固定 dropout 率）<br>
+          ④ σ 直接进目标函数：J += λ<sub>U</sub>·σ (λ<sub>U</sub>=50) → 惩罚高不确定区域<br>
+          ⑤ σ > 0.1 (归一化) 触发主动补点 → LLFVW 补采 → 增量微调
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 6: V1→V4 迭代 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">06</div>
+  <span class="tag tag-orange">关键发现</span>
+  <h2 style="margin-top:12px">V1→V4 迭代：从<span class="accent-orange">虚假最优</span>到<span class="accent">可信优化</span></h2>
+  <p class="subtitle" style="font-size:14px; margin-bottom:12px">对应开题任务 T3：优化算法实现 → 实际经历四版迭代</p>
+
+  <div class="table-wrap" style="margin-top:12px; flex:none">
+    <table>
+      <tr>
+        <th>版本</th><th>优化器</th><th>约束策略</th><th>FM</th><th>功率 (W)</th><th>几何 OOD</th><th>RPM OOD</th><th>可信度</th>
+      </tr>
+      <tr>
+        <td><strong>V1</strong></td><td>CMA-ES</td><td>无约束</td>
+        <td style="color:var(--red)">1.004</td><td>342</td>
+        <td style="color:var(--red)">37/44 (84%)</td>
+        <td style="color:var(--red)">+1455</td>
+        <td style="color:var(--red)">&#9733;</td>
+      </tr>
+      <tr>
+        <td><strong>V1</strong></td><td>PPO</td><td>无约束</td>
+        <td style="color:var(--red)">0.899</td><td>382</td>
+        <td style="color:var(--red)">OOD</td>
+        <td style="color:var(--red)">不可控</td>
+        <td style="color:var(--red)">&#9733;</td>
+      </tr>
+      <tr>
+        <td><strong>V3</strong></td><td>CMA-ES</td><td>OOD 软惩罚</td>
+        <td style="color:var(--yellow)">0.941</td><td>365</td>
+        <td style="color:var(--yellow)">15/44 (34%)</td>
+        <td style="color:var(--yellow)">+1144</td>
+        <td style="color:var(--yellow)">&#9733;&#9733;</td>
+      </tr>
+      <tr style="background:rgba(0,191,165,0.06)">
+        <td><strong>V4</strong></td><td>CMA-ES</td><td>硬约束（数据驱动）</td>
+        <td style="color:var(--teal)"><strong>0.947</strong></td><td><strong>363</strong></td>
+        <td style="color:var(--teal)"><strong>0/44</strong></td>
+        <td style="color:var(--teal)"><strong>范围内</strong></td>
+        <td style="color:var(--teal)"><strong>&#9733;&#9733;&#9733;</strong></td>
+      </tr>
+      <tr style="background:rgba(0,191,165,0.03)">
+        <td></td><td colspan="2" style="font-size:12px; color:var(--gray)">V4 最优解</td>
+        <td colspan="5" style="font-size:12px; color:var(--gray)">FM=0.9469 · P=362.7W · chord CP=[0.0136, 0.0438, 0.0198, 0.0048] · twist CP=[37.4°, 13.5°, 11.3°, 8.5°]</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="split" style="margin-top:16px">
+    <div class="left">
+      <div class="card" style="border-color:var(--red); margin-bottom:12px">
+        <h3>OOD 外推陷阱（核心发现）</h3>
+        <p style="margin-top:6px; font-size:13px">
+          <strong>现象：</strong>CMA-ES V1 给出 FM=1.004（物理不可能值）<br>
+          <strong>诊断：</strong>twist 22/22 截面 OOD, chord 15/22 截面 OOD, RPM 超出 +1455<br>
+          <strong>根因：</strong>MLP 在训练分布内 MAPE 1%，但对 OOD 输入外推不可靠<br>
+          <strong>对比：</strong>PPO 也产出 FM=0.899（OOD 不可控），<em>证明问题不在优化算法</em><br>
+          <strong>→ 驱动方法演变：需要代理模型具备不确定度感知能力</strong>
+        </p>
+      </div>
+      <div class="card" style="border-color:var(--orange)">
+        <h3>V4 边界解 → 数据扩展</h3>
+        <p style="margin-top:6px; font-size:13px">
+          <strong>现象：</strong>8 个 CP 全部卡在约束边界 (chord 交替上/下限, twist 全在下限)<br>
+          <strong>解释：</strong>100 几何的 ±5% 边距可信域太窄，全局最优在域外<br>
+          <strong>方案：</strong>100→1000 几何 (±30% LHS)，扩大可信域后重新优化
+        </p>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card card-highlight">
+        <h3>配平约束求解器（开题方案无此模块）</h3>
+        <p style="margin-top:6px; font-size:13px; color:var(--white)">
+          <strong>三轴平衡：</strong>F<sub>x</sub>=0, F<sub>z</sub>=mg, M<sub>y</sub>=0<br>
+          <strong>求解变量：</strong>[α, Ω₁, Ω₂] (迎角+前后桨转速)<br>
+          <strong>范围：</strong>RPM∈[4000,6500] · α∈[2°,8°]
+        </p>
+        <table style="margin-top:6px; font-size:12px">
+          <tr><td style="color:var(--red)">V1 问题</td><td>收敛率仅 ~3% (scipy.root 对初值敏感)</td></tr>
+          <tr><td style="color:var(--teal)">V2 改进</td><td>多初始值×6 + 热启动 → <strong>100% 收敛</strong></td></tr>
+          <tr><td style="color:var(--teal)">V2 新增</td><td>M<sub>y</sub> 由 MoE 直接预测 (非解析 k<sub>m</sub>·T·R·μ)</td></tr>
+          <tr><td style="color:var(--teal)">V2 优化</td><td>预分配缓冲 (2,47) + last 字典热启动</td></tr>
+        </table>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h3>复合目标函数</h3>
+        <p style="font-size:12px; margin-top:4px; color:var(--white)">
+          J = P<sub>elec</sub>/V + λ<sub>R</sub>·‖R‖² + λ<sub>U</sub>·σ + λ<sub>G</sub>·C<sub>geo</sub><br>
+          <span style="color:var(--gray)">配平失败 → J = 10⁶ 大惩罚淘汰</span>
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 7: 已完成工作三 — 辅助模块 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">07</div>
+  <span class="tag tag-teal">已完成工作（三）</span>
+  <h2 style="margin-top:12px">辅助模块：风场建模 + CFD 验证 <span class="mini-tag done">已完成</span></h2>
+
+  <div class="split" style="margin-top:16px">
+    <div class="left">
+      <div class="card card-highlight" style="margin-bottom:14px">
+        <h3>Mann 复杂风场建模</h3>
+        <p style="margin-top:8px; font-size:13px; color:var(--white)">
+          基于 Mann 模型的三维湍流风场生成<br>
+          频谱法：谱表示 + 随机相位构造 → 满足统计特征的三维风速场
+        </p>
+        <table style="margin-top:8px; font-size:12px">
+          <tr><td>风场盒子</td><td>20m × 1m × 1m, 高度 10m</td></tr>
+          <tr><td>网格点数</td><td>631 × 256 × 256</td></tr>
+          <tr><td>积分尺度</td><td>L<sub>MANN</sub> = 15m</td></tr>
+          <tr><td>各向异性</td><td>Γ = 3.9</td></tr>
+          <tr><td>αε 参数</td><td>0.0660</td></tr>
+          <tr><td>参考风速</td><td>12 m/s</td></tr>
+          <tr><td>IEC 标准</td><td>61400, NTM, 湍流强度 16</td></tr>
+        </table>
+        <p style="margin-top:8px; font-size:12px; color:var(--gray)">
+          方差缩放因子 (1.10, 0.80, 0.48) → σ<sub>u</sub>/U≈0.25, σ<sub>v</sub>/U≈0.18, σ<sub>w</sub>/U≈0.12
+        </p>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card card-highlight" style="margin-bottom:14px">
+        <h3>CFD 验证模板 (Star-CCM+)</h3>
+        <p style="margin-top:8px; font-size:13px; color:var(--white)">
+          对应开题任务 T4：高保真 CFD 验证与可视化
+        </p>
+        <table style="margin-top:8px; font-size:12px">
+          <tr><td>计算域</td><td>入口/出口 10D, 总宽 25D</td></tr>
+          <tr><td>旋转域</td><td>直径 1.2D, 宽 0.4D</td></tr>
+          <tr><td>网格</td><td>~700 万, 阻塞比 2.5%</td></tr>
+          <tr><td>湍流模型</td><td>SST k-ω</td></tr>
+          <tr><td>y+ 范围</td><td>0~1 (满足要求)</td></tr>
+          <tr><td>精度</td><td>C<sub>P</sub>, C<sub>T</sub>, η 误差 ≤5%</td></tr>
+        </table>
+        <p style="margin-top:8px; font-size:12px; color:var(--gray)">
+          已在基准桨 (APC 10×7) 与代表性优化桨上完成对照渲染
+        </p>
+      </div>
+      <div class="card">
+        <h3>验证策略调整说明</h3>
+        <p style="font-size:12px; margin-top:6px">
+          <strong>开题：</strong>CFD 为主要终验手段<br>
+          <strong>实际：</strong>QBlade LLFVW 回验优先（与训练数据同源，闭环快速）<br>
+          CFD 仍保留为辅助高保真验证，模板已就绪
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 8: 当前进展 — 数据扩展 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">08</div>
+  <span class="tag tag-orange">当前进展</span>
+  <h2 style="margin-top:12px">LLFVW 仿真<span class="accent">数据扩展</span> — 100 → 1000 几何 <span class="mini-tag wip">进行中</span></h2>
+
+  <div class="split" style="margin-top:16px">
+    <div class="left">
+      <div class="stat-row" style="justify-content:space-around">
+        <div class="stat">
+          <div class="stat-value accent" style="font-size:40px">1000</div>
+          <div class="stat-label">LHS 采样几何</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value accent" style="font-size:40px">42</div>
+          <div class="stat-label">工况/几何</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value accent" style="font-size:40px">42K</div>
+          <div class="stat-label">目标样本量</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px; margin-bottom:12px">
+        <h3>仿真配置</h3>
+        <table style="margin-top:6px; font-size:13px">
+          <tr><td>仿真器</td><td>QBlade CE v2.0.8.6 LLFVW (SIL)</td></tr>
+          <tr><td>部署</td><td>Linux .so · RTX 3060 GPU (OpenCL)</td></tr>
+          <tr><td>时间步</td><td>1000 步，取后 120 步均值</td></tr>
+          <tr><td>工况设计</td><td>6 RPM × 7 Angle，Wind=10 m/s</td></tr>
+          <tr><td>采样</td><td>LHS (d=8, seed=42), baseline ±30%</td></tr>
+          <tr><td>落盘策略</td><td>batch-size=1（逐几何即时保存 pkl）</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>GPU 加速策略</h3>
+        <p style="font-size:13px; margin-top:6px; color:var(--white)">
+          CPU 并行 (6 worker) 实测 ~50h/几何 → 不可行<br>
+          停止 CPU 后 GPU 速度 3.5h → <strong class="accent">1.1h/几何 (3.2× 提速)</strong><br>
+          <span style="color:var(--gray)">原因：GPU/CPU 共享系统资源导致瓶颈</span>
+        </p>
+      </div>
+    </div>
+    <div class="right">
+      <h3 style="margin-bottom:10px; font-size:16px">进度概览 (2026-06-07)</h3>
+      <div class="bar-group">
+        <div class="bar-label"><span>GPU 当前批次 (geom 710-999)</span><span class="accent">进行中</span></div>
+        <div class="bar-track"><div class="bar-fill teal" style="width:4%"></div></div>
+      </div>
+      <div class="bar-group">
+        <div class="bar-label"><span>已有数据 (geom 700-709)</span><span style="color:var(--green)">10/10 ✓</span></div>
+        <div class="bar-track"><div class="bar-fill green" style="width:100%"></div></div>
+      </div>
+      <div class="bar-group">
+        <div class="bar-label"><span>待补跑 (geom 0-709)</span><span style="color:var(--gray)">GPU relay 排队</span></div>
+        <div class="bar-track"><div class="bar-fill orange" style="width:0%"></div></div>
+      </div>
+
+      <div class="card" style="margin-top:16px; border-color:var(--orange)">
+        <h3>时间预估</h3>
+        <table style="margin-top:6px; font-size:13px">
+          <tr><td>当前速度</td><td>~1.1 h/几何 · ~21 几何/天</td></tr>
+          <tr><td>geom 710-999</td><td>~13 天 → 约 6/20 完成</td></tr>
+          <tr><td>geom 0-709</td><td>~33 天 → 约 7/23 完成</td></tr>
+          <tr><td style="color:var(--orange); font-weight:600">全量 1000</td><td style="color:var(--orange); font-weight:600">预计 7 月下旬</td></tr>
+        </table>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <h3>可提前启动的工作</h3>
+        <p style="font-size:12px; margin-top:4px; color:var(--white)">
+          300+ 几何完成后即可启动 MoE 初步训练<br>
+          验证模型架构、调参策略，数据补齐后增量微调<br>
+          <span style="color:var(--gray)">不必等全量数据 → 节省 2-3 周</span>
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 9: 进度对比 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">09</div>
+  <span class="tag tag-blue">进度对比</span>
+  <h2 style="margin-top:12px">开题进度 vs <span class="accent">实际执行</span></h2>
+
+  <div class="table-wrap" style="margin-top:12px">
+    <table style="font-size:13px">
+      <tr>
+        <th style="width:18%">时间段</th>
+        <th style="width:20%">开题计划</th>
+        <th style="width:35%">实际执行</th>
+        <th style="width:12%">状态</th>
+        <th style="width:15%">偏差说明</th>
+      </tr>
+      <tr>
+        <td>2024.09—2024.12</td>
+        <td>气动建模与仿真平台搭建</td>
+        <td>B-Spline 参数化 + UIUC 验证 + 自动化仿真框架</td>
+        <td><span class="mini-tag done">按计划完成</span></td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>2025.01—2025.04</td>
+        <td>DNN 代理模型搭建</td>
+        <td>100 几何 DNN 训练 + V1 优化 pipeline<br>发现 OOD 外推陷阱</td>
+        <td><span class="mini-tag done">按计划完成</span></td>
+        <td>—</td>
+      </tr>
+      <tr style="background:rgba(68,138,255,0.04)">
+        <td>2025.05—2025.08</td>
+        <td>PPO 在线调参 NSGA-II</td>
+        <td>V1→V4 迭代：OOD 软/硬约束<br>MoE+配平方案设计 (V2)</td>
+        <td><span class="mini-tag changed">方法调整</span></td>
+        <td>OOD 问题<br>→ 放弃 PPO+NSGA-II<br>→ CMA-ES+配平</td>
+      </tr>
+      <tr style="background:rgba(68,138,255,0.04)">
+        <td>2025.09—2025.11</td>
+        <td>复杂风场扩展</td>
+        <td>Mann 风场建模完成<br>V2 代码实现 (MoE + TrimSolver)</td>
+        <td><span class="mini-tag changed">并行推进</span></td>
+        <td>风场建模按计划<br>V2 代码额外完成</td>
+      </tr>
+      <tr style="background:rgba(68,138,255,0.04)">
+        <td>2025.12—2026.04</td>
+        <td>气动外形优化与鲁棒优化</td>
+        <td>QBlade Linux GPU 部署<br>1000 几何 LHS 设计 + 数据生成启动</td>
+        <td><span class="mini-tag changed">调整顺序</span></td>
+        <td>先扩大数据<br>再执行优化</td>
+      </tr>
+      <tr>
+        <td style="color:var(--orange)">2026.05—2026.06</td>
+        <td>高保真 CFD 验证</td>
+        <td>CFD 模板已就绪 · GPU 数据生成中<br><strong>← 当前阶段</strong></td>
+        <td><span class="mini-tag wip">进行中</span></td>
+        <td>CFD 模板提前完成<br>数据生成并行</td>
+      </tr>
+      <tr>
+        <td style="color:var(--gray)">2026.07—2026.08</td>
+        <td>结果整理与分析</td>
+        <td>MoE 训练 + CMA-ES 优化 + QBlade 回验</td>
+        <td><span class="mini-tag todo">待执行</span></td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td style="color:var(--gray)">2026.09—2026.11</td>
+        <td>论文撰写与答辩</td>
+        <td>论文撰写与答辩准备</td>
+        <td><span class="mini-tag todo">待执行</span></td>
+        <td>—</td>
+      </tr>
+    </table>
+  </div>
+
+  <div style="margin-top:14px; padding:14px 20px; background:rgba(68,138,255,0.06); border-radius:10px; border:1px solid rgba(68,138,255,0.2)">
+    <p style="font-size:13px">
+      <strong class="accent-blue">总结：</strong>
+      开题计划的 7 个阶段中，阶段 1-2 按计划完成；阶段 3-5 因 OOD 发现而调整方法路线（PPO+NSGA-II → CMA-ES+配平约束，DNN → MoE），
+      总体工作量增加但方法更扎实；阶段 6 (CFD) 模板已提前就绪；论文写作时间节点未变。
+    </p>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 10: 后续计划 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">10</div>
+  <span class="tag tag-orange">后续计划</span>
+  <h2 style="margin-top:12px">剩余工作<span class="accent">路线图</span></h2>
+
+  <div class="split" style="margin-top:12px">
+    <div class="left">
+      <div class="timeline">
+        <div class="tl-item">
+          <div class="tl-dot active"></div>
+          <div class="tl-date">2026.06 — 进行中</div>
+          <div class="tl-title">1000 几何 LLFVW 数据生成</div>
+          <div class="tl-desc">GPU 加速 · ~21 几何/天 · 预计 7 月下旬全量完成</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot pending"></div>
+          <div class="tl-date">2026.07 上旬</div>
+          <div class="tl-title">data.py 转换 + MoE 训练</div>
+          <div class="tl-desc">pkl→CSV · MoE 真实数据训练 · K-fold 验证 · 300+ 几何先行启动</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot pending"></div>
+          <div class="tl-date">2026.07 下旬</div>
+          <div class="tl-title">CMA-ES 优化闭环</div>
+          <div class="tl-desc">运行优化 · 不确定度引导主动补点 · 迭代至收敛</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot pending"></div>
+          <div class="tl-date">2026.08</div>
+          <div class="tl-title">QBlade 回验 + CFD 辅助验证</div>
+          <div class="tl-desc">最优几何 LLFVW 全工况回验 · Star-CCM+ 流场可视化</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot pending"></div>
+          <div class="tl-date">2026.08—09</div>
+          <div class="tl-title">结果分析</div>
+          <div class="tl-desc">基线 vs 优化桨对比 · 灵敏度分析 · 图表整理</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-dot pending"></div>
+          <div class="tl-date">2026.09—11</div>
+          <div class="tl-title">论文撰写与答辩准备</div>
+          <div class="tl-desc">方法论 + 实验结果 + 结论展望 · 预计 5-6 万字</div>
+        </div>
+      </div>
+    </div>
+    <div class="right">
+      <div class="card card-highlight" style="margin-bottom:12px">
+        <h3>近期关键里程碑</h3>
+        <ul class="check-list">
+          <li style="font-size:13px"><span class="icon" style="color:var(--green)">✓</span> LHS 1000 几何采样设计</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--green)">✓</span> QBlade Linux GPU 部署</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--green)">✓</span> V2 管线代码完成 (MoE+Trim+CMA-ES)</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--green)">✓</span> batch-size=1 防丢失策略</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--orange)">◐</span> 全量数据生成 (进行中)</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--gray)">○</span> pkl→CSV 批量转换</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--gray)">○</span> MoE 真实数据训练</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--gray)">○</span> CMA-ES 优化 + 主动补点</li>
+          <li style="font-size:13px"><span class="icon" style="color:var(--gray)">○</span> QBlade 回验 + CFD 验证</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:var(--orange)">
+        <h3>风险与应对</h3>
+        <ul class="check-list">
+          <li style="font-size:12px"><span class="icon">1</span> <strong>数据生成周期长</strong>（~47 天）：300+ 几何子集先行训练，不阻塞</li>
+          <li style="font-size:12px"><span class="icon">2</span> <strong>MoE 过拟合</strong>：K-fold 交叉验证 + 早停 + balance 正则</li>
+          <li style="font-size:12px"><span class="icon">3</span> <strong>边界解持续</strong>：扩大 CP 搜索范围 + 主动补点闭环</li>
+          <li style="font-size:12px"><span class="icon">4</span> <strong>LLFVW 与 CFD 偏差</strong>：多保真点验证 + 校准项</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 11: 创新点与预期成果 -->
+<!-- ============================================================ -->
+<div class="slide">
+  <div class="slide-number">11</div>
+  <span class="tag tag-teal">总结</span>
+  <h2 style="margin-top:12px">研究<span class="accent">创新点</span>与预期成果</h2>
+
+  <div class="card-grid cols-3" style="margin-top:16px">
+    <div class="card card-highlight">
+      <div class="card-icon">1</div>
+      <h3 style="color:var(--teal); font-size:15px">MoE 代理模型 + 不确定度量化</h3>
+      <p style="margin-top:8px; font-size:12px">
+        <strong>相对现有工作：</strong>Wu et al. (2024), Mian et al. (2021) 等螺旋桨代理模型均使用单 MLP/Kriging，无预测可信度输出<br>
+        <strong>本文新增：</strong>K=4 混合专家 + 异方差 NLL → 伴随输出 σ；
+        混合方差 σ²=Σπ<sub>k</sub>(σ<sub>k</sub>²+μ<sub>k</sub>²)−μ² 量化认知不确定性<br>
+        <strong>证据：</strong>V1 MLP 在 OOD 区域给出 FM=1.004 虚假预测，σ 感知可防止此类失效
+      </p>
+    </div>
+    <div class="card card-highlight">
+      <div class="card-icon">2</div>
+      <h3 style="color:var(--teal); font-size:15px">前飞差速配平嵌套优化</h3>
+      <p style="margin-top:8px; font-size:12px">
+        <strong>相对现有工作：</strong>Klimczyk (2022), Oliveira et al. (2024) 等仅优化悬停工况，不涉及前飞配平约束<br>
+        <strong>本文新增：</strong>在 CMA-ES 每次评估中嵌套三轴配平求解 [α,Ω₁,Ω₂]；
+        M<sub>y</sub> 由 MoE 直接预测（非解析估算 k<sub>m</sub>·T·R·μ）<br>
+        <strong>证据：</strong>多初始值×6 → 100% 收敛率，确保优化结果物理可实现
+      </p>
+    </div>
+    <div class="card card-highlight">
+      <div class="card-icon">3</div>
+      <h3 style="color:var(--teal); font-size:15px">OOD 感知 + 主动补点闭环</h3>
+      <p style="margin-top:8px; font-size:12px">
+        <strong>相对现有工作：</strong>代理模型优化文献 (Tao 2019, Bu 2022) 普遍假设模型在全域可靠<br>
+        <strong>本文新增：</strong>实证揭示 OOD 陷阱 (84% 截面外推) → 数据驱动硬约束 (±5% 边距) + σ 引导主动补点<br>
+        <strong>闭环：</strong>优化→σ超阈值→识别盲区→补采LLFVW数据→重训→再优化
+      </p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:20px; padding:24px">
+    <h3 style="font-size:16px; margin-bottom:14px; text-align:center">预期成果 — 对应开题四项预期目标</h3>
+    <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:20px; text-align:center">
+      <div>
+        <div style="font-size:28px; margin-bottom:6px">1</div>
+        <strong style="font-size:14px">优化平台搭建</strong><br>
+        <span style="font-size:12px; color:var(--gray)">LLFVW + MoE + CMA-ES<br>全栈自动化，含配平约束</span><br>
+        <span class="mini-tag done" style="margin-top:4px">代码完成</span>
+      </div>
+      <div>
+        <div style="font-size:28px; margin-bottom:6px">2</div>
+        <strong style="font-size:14px">优化螺旋桨</strong><br>
+        <span style="font-size:12px; color:var(--gray)">APC 10×7 基准桨<br>V<sub>cruise</sub>=10m/s 最优几何</span><br>
+        <span class="mini-tag wip" style="margin-top:4px">7 月执行</span>
+      </div>
+      <div>
+        <div style="font-size:28px; margin-bottom:6px">3</div>
+        <strong style="font-size:14px">验证与可视化</strong><br>
+        <span style="font-size:12px; color:var(--gray)">QBlade 回验 + Star-CCM+<br>流场对比 · 模板已就绪</span><br>
+        <span class="mini-tag wip" style="margin-top:4px">8 月执行</span>
+      </div>
+      <div>
+        <div style="font-size:28px; margin-bottom:6px">4</div>
+        <strong style="font-size:14px">42K 仿真数据集</strong><br>
+        <span style="font-size:12px; color:var(--gray)">1000 几何 × 42 工况<br>LHS d=8 全覆盖</span><br>
+        <span class="mini-tag wip" style="margin-top:4px">生成中 (~7 月)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SLIDE 12: 结尾 -->
+<!-- ============================================================ -->
+<div class="slide cover">
+  <div class="bg-pattern"></div>
+  <h1>感谢各位老师<br><span class="accent">批评指正</span></h1>
+  <p class="subtitle" style="margin-top:20px">敬请提问</p>
+  <div class="meta" style="margin-top:48px">
+    <p style="color:var(--gray)">郭跃 &nbsp;|&nbsp; 指导教师：何晓舟 教授</p>
+    <p style="margin-top:6px; color:var(--gray)">哈尔滨工业大学（深圳） &nbsp;|&nbsp; 2026 年 6 月</p>
+  </div>
+</div>
+
+</div><!-- /deck -->
+
+<!-- 导航 -->
+<div class="nav">
+  <button id="btnPrev" onclick="go(-1)">&#8249;</button>
+  <span class="counter" id="counter">1 / 13</span>
+  <button id="btnNext" onclick="go(1)">&#8250;</button>
+</div>
+
+<div class="key-hint">&#8592; &#8594; 键翻页 &nbsp;|&nbsp; F 全屏</div>
+
+<script>
+const slides = document.querySelectorAll('.slide');
+let cur = 0;
+const total = slides.length;
+
+function show(idx) {
+  slides[cur].classList.remove('active');
+  cur = Math.max(0, Math.min(idx, total - 1));
+  slides[cur].classList.add('active');
+  document.getElementById('counter').textContent = `${cur + 1} / ${total}`;
+  document.getElementById('progressBar').style.width = `${((cur + 1) / total) * 100}%`;
+}
+
+function go(delta) { show(cur + delta); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); go(1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+  if (e.key === 'Home') { e.preventDefault(); show(0); }
+  if (e.key === 'End') { e.preventDefault(); show(total - 1); }
+  if (e.key === 'f' || e.key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  }
+});
+
+let touchStartX = 0;
+document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+document.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - touchStartX;
+  if (Math.abs(dx) > 60) go(dx < 0 ? 1 : -1);
+});
+
+show(0);
+</script>
+
+</body>
+</html>

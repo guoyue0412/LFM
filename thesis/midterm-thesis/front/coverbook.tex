@@ -1,0 +1,53 @@
+% !TEX root = ../thesis.tex
+
+\hitsetup{
+  %=========
+  % 中文信息
+  %=========
+  ctitle={基于代理模型的无人机螺旋桨前飞工况气动外形优化},
+  ctitlecover={基于代理模型的无人机螺旋桨前飞工况气动外形优化},
+  ckeywords={螺旋桨气动外形优化; 自由涡尾迹方法; 异方差代理模型; 不确定度量化; CMA-ES; 差速配平嵌套优化},
+  cxueke={工学},
+  csubject={能源动力},
+  caffil={机器人与先进制造学院},
+  cauthor={郭跃},
+  csupervisor={何晓舟 教授},
+  cdate={2026年7月},
+  cstudentid={24S153206},
+  %=========
+  % 英文信息
+  %=========
+  etitle={Surrogate-Model-Based Aerodynamic Shape Optimization of UAV Propellers under Forward-Flight Condition},
+  ekeywords={Propeller aerodynamic optimization, Lifting-Line Free Vortex Wake, Heteroscedastic surrogate model, Uncertainty quantification, CMA-ES, Differential-trim nested optimization},
+  exueke={Engineering},
+  esubject={Energy and Power Engineering},
+  eaffil={School of Mechanical Engineering and Automation},
+  eauthor={Yue Guo},
+  esupervisor={Prof. Xiaozhou He},
+  edate={June 2026}
+}
+
+% 中文摘要
+\begin{cabstract}
+
+随着低空经济发展，小型无人机在城市低空场景广泛承担巡航、配送等任务，螺旋桨气动外形对推进效率与三轴平衡能力具有决定性作用。本课题针对 X 构型四旋翼无人机前飞工况开展螺旋桨气动外形优化研究：前飞工况包含非轴向来流的尾迹—桨叶耦合、前后桨升力差导致的俯仰矩耦合以及三轴差速配平约束等典型耦合特征，对气动求解效率、代理模型可信度和优化结果物理可实现性提出了更高要求。本文面向前飞巡航效率提升与配平能力保持，建立兼顾计算效率、预测精度和不确定度感知能力的螺旋桨外形优化方法。
+
+围绕上述需求，本文构建了建模、代理预测、优化和高保真验证相结合的螺旋桨气动外形优化平台。在气动建模层面，以 8 个 B-Spline 控制点描述弦长与扭角分布并插值得到 22 个径向截面，结合非线性升力线自由涡尾迹（Lifting-Line Free Vortex Wake, LLFVW）方法构建低成本求解器，并通过翼型层（XFoil, $Re=10^5\sim 3\times 10^5$）和螺旋桨层（APC 10$\times$7, $\text{RPM}\in[4007,6519]$）两级对照 UIUC 风洞数据完成验证。在代理建模层面，采用异方差多层感知机配合 LIFT-NLL 损失，输出推力、面内力、俯仰力矩和扭矩的预测均值 $\mu$ 与不确定度 $\sigma$；在 237 几何 9954 样本上训练，测试集 MAE 为 0.0332、$R^2$ 达到 0.987、俯仰力矩校准误差 ECE 为 0.13，参数量仅 80K，兼顾精度与推理效率。
+
+在优化层面，本文以 CMA-ES 全局优化器结合数据驱动硬约束，并将三轴差速配平求解器嵌入目标函数评估流程，同步求解迎角 $\alpha$ 与前后桨转速 $\Omega_1,\Omega_2$。目标函数综合电功率、配平残差、代理不确定度和几何光顺性，使候选外形在气动性能与物理可实现性之间取得平衡。优化结果在方法学验证集上达到 $FM=0.947$、$P_{\text{elec}}=362.7\,\text{W}$，相比基线 APC 10$\times$7 螺旋桨在推进效率和前飞配平性能上均有显著提升。本文同步建立了 Star-CCM+ CFD 验证模板（$\sim 700$ 万网格、$y^+ \in [0,1]$、SST $k$-$\omega$、误差 $\leq 5\%$）用于优化外形的独立高保真验证。
+
+本文的主要创新成果在于：（1）以 LLFVW 替代高成本 CFD 作为优化内循环求解器，在保持前飞尾迹耦合描述的同时显著降低样本生成成本；（2）通过异方差代理模型同步给出预测值与不确定度，为优化过程提供可信度约束并支撑主动补点闭环；（3）将差速配平作为算子嵌入气动外形优化的目标函数评估，使优化结果在前飞工况下物理可实现。
+
+\end{cabstract}
+
+\begin{eabstract}
+
+With the rapid development of the low-altitude economy, small unmanned aerial vehicles (UAVs) widely undertake cruise and delivery tasks in urban low-altitude scenarios. The propeller, as a critical component of the propulsion system, has a decisive influence on propulsion efficiency and three-axis trim capability. This work addresses propeller aerodynamic shape optimization for X-configuration quadrotor UAVs under steady free-stream forward-flight conditions. Forward flight involves non-axial inflow wake-blade coupling, pitch-moment coupling caused by front-rear thrust differential, and three-axis differential-trim constraints, placing higher requirements on aerodynamic-solver efficiency, surrogate-model credibility, and physical realizability of optimized geometries. Therefore, this study develops a propeller shape optimization method that improves forward-flight cruise efficiency while preserving trim capability, with emphasis on computational efficiency, prediction accuracy, and uncertainty awareness.
+
+This study constructs an integrated platform that combines aerodynamic modeling, surrogate prediction, optimization, and high-fidelity validation. At the geometry and aerodynamic modeling layer, the chord and twist distributions are parameterized by 8 B-Spline control points and interpolated into 22 radial sections. A low-cost aerodynamic solver is established based on the nonlinear Lifting-Line Free Vortex Wake (LLFVW) method and validated against the UIUC wind-tunnel database at both the airfoil level (XFoil, $Re=10^5\sim 3\times 10^5$) and the propeller level (APC 10$\times$7, $\text{RPM}\in[4007,6519]$). At the surrogate modeling layer, a Heteroscedastic MLP trained with LIFT-NLL loss is adopted. Its inputs include rotor speed, free-stream velocity, angle of attack, and 22 chord plus 22 twist parameters; its outputs are the predictive means $\mu$ and uncertainties $\sigma$ of thrust, in-plane force, pitch moment, and torque. Trained on 9954 operating samples from 237 geometries, the model achieves a best test MAE of 0.0332, an $R^2$ of 0.987, and a pitch-moment uncertainty calibration error (ECE) of 0.13. With approximately 80K parameters, the model provides high prediction accuracy, calibrated uncertainty, and low inference cost.
+
+At the optimization layer, the CMA-ES global optimizer is coupled with data-driven constraints, and a nested three-axis differential-trim solver is embedded into the objective evaluation. The solver simultaneously resolves the angle of attack $\alpha$ and the front/rear rotor speeds $\Omega_1,\Omega_2$, so that the optimized geometry satisfies forward-flight trim constraints while improving propulsive efficiency. The objective function jointly considers electrical power, trim residuals, surrogate uncertainty, and geometric smoothness, balancing aerodynamic performance with physical realizability. The optimized propeller achieves $FM=0.947$ and $P_{\text{elec}}=362.7$ W on the methodological-validation dataset, showing higher propulsive efficiency and better forward-flight trim performance than the baseline APC 10$\times$7 propeller. A Star-CCM+ CFD validation template ($\sim 7$M cells, $y^+ \in [0,1]$, SST $k$-$\omega$, error $\leq 5\%$) is also established for independent high-fidelity verification of the optimized geometry.
+
+The advantages of this work are threefold: (i) the LLFVW solver replaces high-cost CFD in the optimization loop, reducing sample-generation cost while retaining the ability to describe forward-flight wake coupling; (ii) the heteroscedastic surrogate model provides both aerodynamic predictions and calibrated uncertainty, enabling confidence-aware optimization; and (iii) the multirotor differential-trim procedure is embedded into the shape-optimization evaluation, ensuring that the optimized propeller is not only aerodynamically efficient but also compatible with the force and moment balance required in UAV forward flight.
+
+\end{eabstract}

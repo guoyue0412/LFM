@@ -1,0 +1,85 @@
+% !TEX root = ../thesis.tex
+% 物理量名称及符号表 — 哈工大写作指南 §2.4 / §2.9 要求
+
+\chapter*{物理量名称及符号表}
+\addcontentsline{toc}{chapter}{物理量名称及符号表}
+\markboth{物理量名称及符号表}{物理量名称及符号表}
+
+\section*{主要物理量}
+
+\begin{tabular}{p{2.5cm}p{8cm}p{2.5cm}}
+\toprule
+\textbf{符号} & \textbf{名称}                       & \textbf{单位}    \\
+\midrule
+$T$           & 螺旋桨推力 (Thrust)                  & N                \\
+$H$           & 螺旋桨面内力 (in-plane force)         & N                \\
+$M_y$         & 螺旋桨俯仰力矩 (pitch moment)         & N$\cdot$m        \\
+$Q$           & 螺旋桨扭矩 (torque)                  & N$\cdot$m        \\
+$\Omega$      & 螺旋桨转速                          & rad/s            \\
+$\text{RPM}$  & 螺旋桨转速 (revolutions per minute)  & rpm              \\
+$V$, $U_\infty$ & 来流速度                          & m/s              \\
+$\alpha$      & 来流攻角                            & rad / deg        \\
+$\text{ANGLE}$ & QBlade 倾角约定 ($90^\circ - \alpha$) & deg          \\
+$R$           & 螺旋桨半径                          & m                \\
+$D$           & 螺旋桨直径 ($D = 2R$)                & m                \\
+$r$           & 径向位置                            & m                \\
+$c(r)$        & 弦长沿径向分布                      & m                \\
+$\theta(r)$   & 扭角沿径向分布                      & deg              \\
+$\rho$        & 空气密度                            & kg/m$^3$         \\
+$Re$          & 雷诺数                              & --               \\
+$FM$          & 品质因数 (Figure of Merit)           & --               \\
+$P_\text{elec}$ & 电功率                            & W                \\
+$\eta$        & 电机+电调综合效率                    & --               \\
+$\sigma$      & 代理模型预测不确定度（标准差）         & --               \\
+$\pi_k$       & MoE 门控权重 (第 $k$ 个专家)         & --               \\
+$\mu$         & 代理模型预测均值                    & --               \\
+$\mathcal{L}$ & 损失函数                            & --               \\
+\bottomrule
+\end{tabular}
+
+\section*{主要缩略语}
+
+\begin{tabular}{p{3cm}p{10cm}}
+\toprule
+\textbf{缩略语} & \textbf{英文全称 / 中文含义}                                        \\
+\midrule
+LLFVW          & Lifting-Line Free Vortex Wake（升力线自由涡尾迹方法）                   \\
+CFD            & Computational Fluid Dynamics（计算流体力学）                       \\
+DNN / MLP      & Deep Neural Network / Multi-Layer Perceptron                      \\
+MoE            & Mixture of Experts（混合专家网络）                                  \\
+NLL            & Negative Log-Likelihood（负对数似然）                              \\
+LIFT-NLL       & 一种异方差 NLL 损失（参见 LIFT 论文 arXiv:2601.21363）                 \\
+MDN            & Mixture Density Network（混合密度网络）                            \\
+CMA-ES         & Covariance Matrix Adaptation Evolution Strategy（协方差矩阵自适应进化策略） \\
+PPO            & Proximal Policy Optimization（近端策略优化）                        \\
+NSGA-II        & Non-dominated Sorting Genetic Algorithm II（非支配排序遗传算法 II）    \\
+LHS            & Latin Hypercube Sampling（拉丁超立方采样）                          \\
+OOD            & Out-of-Distribution（分布外）                                     \\
+ECE            & Expected Calibration Error（期望校准误差）                          \\
+MAPE           & Mean Absolute Percentage Error（平均绝对百分比误差）                  \\
+MAE            & Mean Absolute Error（平均绝对误差）                                 \\
+RMSE           & Root Mean Square Error（均方根误差）                                \\
+UAV            & Unmanned Aerial Vehicle（无人机）                                  \\
+SIL            & Software-in-the-Loop（软件在环）                                   \\
+GPU            & Graphics Processing Unit（图形处理器）                              \\
+$y^+$          & 无量纲壁面距离                                                      \\
+$k$-$\omega$   & 双方程湍流模型                                                      \\
+\bottomrule
+\end{tabular}
+
+\section*{下标与上标约定}
+
+\begin{tabular}{p{2cm}p{10cm}}
+\toprule
+\textbf{下/上标} & \textbf{含义}                                          \\
+\midrule
+$_1, _2$        & 分别表示前桨和后桨                                       \\
+$_\infty$       & 来流（远场）                                            \\
+$_\text{cp}$    & B-Spline 控制点                                         \\
+$_\text{mix}$   & MoE 混合输出                                            \\
+$_k$            & 第 $k$ 个专家                                           \\
+$_j$            & 第 $j$ 个输出维度（$\in\{T, H, M_y, Q\}$）              \\
+$\hat\cdot$     & 代理模型预测值                                          \\
+$\bar\cdot$     & 平均值                                                 \\
+\bottomrule
+\end{tabular}

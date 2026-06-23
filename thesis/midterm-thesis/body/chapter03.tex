@@ -1,0 +1,547 @@
+% !TEX root = ../thesis.tex
+
+\chapter{代理模型：DNN 到 MoE 的演进}
+\label{chap:surrogate}
+
+本章阐述代理模型的建模与迭代过程，对应开题报告第二项研究任务（T2）。
+本章首先介绍单一多层感知机（MLP）DNN 代理模型（V1）的架构、训练过程与分布内精度评估；
+随后在 100 几何方法学验证集上呈现 V1 优化迭代过程中观察到的分布外（Out-of-Distribution, OOD）外推现象，
+并分析其作为优化"虚假最优"成因的诊断过程；
+进而引入混合专家网络（Mixture of Experts, MoE）作为 V2 代理模型，
+通过异方差负对数似然（Heteroscedastic Negative Log-Likelihood, NLL）损失实现预测均值 $\mu$ 与不确定度 $\sigma$ 的同步输出；
+最后给出对 MoE 与其他不确定度量化方案的对比分析。
+
+\section{基于 MLP 的 V1 DNN 代理模型}
+
+\subsection{数据预处理}
+
+基于自动化仿真得到的数据库（100 几何 $\times$ 72 工况 = 7\,200 样本），
+对数据进行标准化处理，确保输入特征（几何控制点、工况参数）在相同尺度下，
+并将其拆分为训练集与验证集，拆分比例设置为 9:1。
+
+\subsection{网络架构}
+
+V1 神经网络模型由以下几层构成：
+\begin{enumerate}
+  \item \textbf{输入层}：接收螺旋桨几何控制点与工况参数的标准化数据。输入特征维度为 11，
+        包括 8 个 B-Spline 控制点（chord、twist 各 4 个）以及 3 个工况参数（转速 RPM、攻角 $\alpha$、来流速度 $U_\infty$）。
+  \item \textbf{B-Spline 层}：采用 B-Spline 基函数，将控制点映射到 B-Spline 基函数空间，并进行插值。
+  \item \textbf{归一化层}：通过标准化处理优化网络训练过程。
+  \item \textbf{特征提取层}：提取几何与工况的深层特征，特征维度为 128，可视为所有气动指标的共享权重基座。
+  \item \textbf{隐藏层}：四层全连接层，节点数依次为 128、64、64、32，激活函数为 ReLU，用于学习输入与输出 $\{T, F_y, Q\}$（推力、法向力、扭矩）之间的非线性映射；俯仰矩 $M_y$ 在 V1 阶段由对称性假设 $M_y \approx k_m \cdot T \cdot R \cdot \mu$ 解析估算，未直接预测。
+  \item \textbf{输出层}：三个直接输出标量 $\{T, F_y, Q\}$ 加 1 个解析估算 $M_y$；对动态任务输出维度为 $3(N+1) + 1$，
+        其中 $N$ 为以 QBlade 时间步长计的单周期序列长度。
+\end{enumerate}
+
+\subsection{超参数与训练}
+
+V1 DNN 训练过程中采用的主要超参数如表~\ref{tab:dnn_hyper}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{V1 DNN 模型的超参数设置}
+\label{tab:dnn_hyper}
+\begin{tabular}{lll}
+\toprule
+\textbf{参数名称} & \textbf{参数值} & \textbf{备注} \\
+\midrule
+输入维度（input\_dim） & 11 & 控制点与工况参数 \\
+输出维度（output\_dim） & $4(N+1)$ & 四个气动指标；$N$ 为序列长度 \\
+特征提取层维度 & 128 & 共享特征层 \\
+隐藏层维度（hidden\_dims） & [128, 64, 64, 32] & 深层特征学习 \\
+激活函数（activation） & ReLU & 隐藏层激活 \\
+正则项系数（dropout） & 0.001 & 防过拟合 \\
+学习率（learning\_rate） & 0.001 & Adam 初始学习率 \\
+优化器（optimizer） & Adam & 优化算法 \\
+学习率调度（lr\_scheduler） & CosineAnnealingLR & 余弦退火 \\
+损失函数（loss） & MSE & 均方误差 \\
+批次大小（batch\_size） & 16 & 每批样本数 \\
+迭代次数（epochs） & 5\,000 & 总轮次 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{分布内精度评估}
+
+V1 DNN 在训练集和测试集上的 MSE 同步下降且差距较小，测试集 $R^2$ 接近 1，
+表明模型有效学习且无明显过拟合，具备良好分布内泛化性。
+三个直接输出通道 $T$、$F_y$、$Q$ 在训练/测试集上的误差分布均呈现良好线性一致性与窄幅残差带，
+具体精度：$T$ MAPE $\approx 1.03\%$，$F_y$ MAPE $\approx 1.50\%$，$Q$ MAPE $\approx 0.99\%$，
+表明在常见工况（$\alpha$、$\text{RPM}$、$U_\infty$ 组合）下可稳定复现 LLFVW 的物理趋势与数量级。
+
+\section{OOD 外推陷阱的发现}
+
+V1 DNN 在分布内的优异精度（MAPE $\approx 1\%$）使其看似可作为开题报告中规划的 PPO + NSGA-II 优化的可靠代理。
+然而，在 100 几何方法学验证集上将 V1 代理直接耦合 CMA-ES 优化器开展无约束寻优时，
+得到的最优解品质因数 $FM = 1.004$，超过物理理论上限（$FM \leq 1$），属于明显的虚假最优。
+
+\subsection{OOD 诊断}
+
+对 V1 CMA-ES 最优解的控制点分布进行 OOD 诊断，
+将每个控制点与训练数据的最小/最大值进行对比，
+发现：
+\begin{itemize}
+  \item twist 22 个截面中 100\% 落入训练分布之外；
+  \item chord 22 个截面中 68\% 落入训练分布之外；
+  \item 转速 $\text{RPM}$ 外推 +1\,455 转（超出训练区间 $[4\,000, 6\,500]$）。
+\end{itemize}
+即 V1 在控制点空间中 84\%（37/44）的截面落入 OOD 区域。
+DNN 在 OOD 区域的预测不可靠，但其确定性输出形式无法向优化器反馈"该解不可信"，
+从而被 CMA-ES 视为高质量解持续收敛。
+
+\subsection{优化算法不是根因}
+
+为排除优化算法层面的因素，进一步在同一 V1 代理上切换至开题原计划的 PPO + NSGA-II 优化路线，
+得到 $FM = 0.899$，OOD 同样不可控。
+这说明优化算法的差异并不能解决虚假最优问题，
+\textbf{根因在于代理模型缺乏不确定度感知}：
+在控制点 / 工况空间的 OOD 区域，
+确定性 MLP 仍会输出貌似合理但实际不可靠的预测值，
+进而误导任何优化器。
+
+由此本研究确立 V2 代理模型的两项核心需求：
+（i）输出层需同步给出预测均值 $\mu$ 与不确定度 $\sigma$；
+（ii）$\sigma$ 需对输入相关、能够在 OOD 区域显著增大。
+
+\section{基于混合专家的 V2 MoE 代理模型}
+
+\subsection{MoE 架构设计}
+
+MoE 网络由三个模块组成：
+\begin{enumerate}
+  \item \textbf{Shared Encoder}：$47 \to 64$，BatchNorm + ReLU；
+        将输入（3 工况参数 + 22 个截面 chord + 22 个截面 twist，共 47 维）映射为共享特征。
+  \item \textbf{Gating Network}：$64 \to K$，softmax 权重；
+        根据共享特征自适应地将样本分配到 $K = 4$ 个专家。
+  \item \textbf{Experts}：$K = 4$ 个专家，各为 $64 \to 128 \to 8$ 的 MLP，
+        输出 $[\mu_4 + \log\sigma_4]$，对应 $[T, H, M_y, Q]$ 四维气动量及其异方差不确定度
+        $[\sigma_T, \sigma_H, \sigma_{M_y}, \sigma_Q]$。
+\end{enumerate}
+
+最终输出按门控权重 $\pi_k$ 进行混合：
+\begin{equation}
+\mu = \sum_{k=1}^{K} \pi_k\,\mu_k, \qquad
+\sigma^2 = \sum_{k=1}^{K} \pi_k\,(\sigma_k^2 + \mu_k^2) - \mu^2.
+\end{equation}
+混合方差包含每个专家的内在方差以及专家间均值的分歧方差，
+后者在 OOD 区域显著增大，构成 OOD 检测的内在信号。
+
+\subsection{异方差 NLL 损失与正则化}
+
+V2 采用异方差 NLL 损失训练：
+\begin{equation}
+\mathcal{L}_{\text{NLL}} = \sum_{i=1}^{B}\;\sum_{j \in \{T,H,M_y,Q\}}
+\left[\frac{(\mu_{ij} - y_{ij})^2}{2\sigma_{ij}^2} + \frac{1}{2}\log\sigma_{ij}^2\right],
+\end{equation}
+其中第一项强制 $\mu$ 拟合真值、且 $\sigma$ 越小则惩罚越大；
+第二项防止 $\sigma$ 无限增大。
+两项共同迫使网络在数据充分覆盖的区域输出小 $\sigma$、
+在数据稀疏 / OOD 区域输出大 $\sigma$，实现输入相关的不确定度学习。
+
+为防止专家坍缩到同一函数（gating 退化为 one-hot），引入两项正则化：
+\begin{equation}
+\mathcal{L}_{\text{balance}} = \lambda_{\text{bal}}\,\text{Var}_k\!\left[\,\bar\pi_k\,\right],\qquad
+\mathcal{L}_{\text{entropy}} = -\lambda_{\text{ent}}\,\mathbb{E}\!\left[\sum_k \pi_k \log \pi_k\right],
+\end{equation}
+其中 $\bar\pi_k$ 是 batch 内专家 $k$ 的平均使用率。
+
+\subsection{与 V1 的关键改进}
+
+相比 V1 DNN，V2 MoE 的核心改进包括：
+\begin{itemize}
+  \item \textbf{不确定度量化}：异方差 NLL 损失自动学习输入相关的预测不确定度 $\sigma$；
+  \item \textbf{$M_y$ 直接预测}：$M_y$ 由 MoE 直接预测，
+        不再使用解析估算 $M_y \approx k_m \cdot T \cdot R \cdot \mu$，避免几何无关的系统性偏差；
+  \item \textbf{输入维度扩展}：输入维度由 V1 的 11 扩展至 47，引入 22 截面的完整几何分布，
+        提升对几何细节的辨识能力；
+  \item \textbf{多专家分区}：Gating 网络天然适配多工况分区，
+        在 $\text{RPM} \in [4\,000, 6\,500]$ 等不同转速区间分配专门的 expert，提升精度上限。
+\end{itemize}
+
+\section{方案对比：MoE vs.\ MC-Dropout vs.\ Deep Ensemble}
+
+可用于不确定度量化的代理建模方案主要有 MC-Dropout、Deep Ensemble 与 MoE 三种。
+本研究选择 MoE 而非另外两类的核心原因如表~\ref{tab:uncertainty_compare}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{不同不确定度量化方案对比}
+\label{tab:uncertainty_compare}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{方案} & \textbf{单次前向} & \textbf{$\sigma$ 输入相关} & \textbf{多工况分区} & \textbf{推理成本} \\
+\midrule
+MC-Dropout & 否（需 $T$ 次采样） & 弱 & 否 & $T \times$ \\
+Deep Ensemble & 否（需 $N$ 次前向） & 强 & 否 & $N \times$ \\
+\textbf{MoE（本文）} & 是 & 强 & 是 & $1 \times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CMA-ES 在每一代需要进行 $\lambda = 16$ 次评估、$\sim 200$ 代收敛，
+合计需要 $\sim 3\,200$ 次代理调用；
+若再嵌套配平求解器（每次评估求解 $\sim 6$ 初值），单次优化总评估数可达 $\sim 1.92 \times 10^4$。
+在如此高的吞吐压力下，MoE 单次前向同时输出 $\mu$ 与 $\sigma$ 的特性带来明显的工程优势。
+
+值得指出的是，Nabian 与 Choudhry\cite{Nabian2025moe} 于 2025 年 8 月在 arXiv 上发布了同类思想的工作，
+提出了用于外部气动仿真代理建模的 MoE 门控网络，
+通过对 DoMINO、X-MeshGraphNet、FigConvNet 三种异构基础模型进行空间变权融合，
+并在训练损失中加入熵正则化项以防止 Expert 坍缩，
+在 DrivAerML 汽车气动数据集上展现出优于单一模型与简单 ensemble 平均的性能。
+该工作与本文方案在采用 MoE 架构、引入熵正则化方面思路一致，
+也从侧面印证了 MoE + 不确定度量化是当前气动代理建模的前沿方向。
+两者的差异在于：本文将 MoE 用作\emph{单一气动求解器（LLFVW）数据下的工况—几何分区与不确定度量化器}，
+而 Nabian 等的工作将 MoE 用作\emph{异构高保真模型集成器}；
+本文方法的输出还需进一步作为优化器（CMA-ES）的不确定度反馈通道，
+驱动主动补点闭环（见第~\ref{chap:optimization}~章），
+这是 Nabian 等的工作中尚未涉及的环节。
+
+\subsection{损失函数变体的实测对比：LIFT-NLL vs.\ MDN-NLL}
+\label{sec:lift_vs_mdn}
+
+本研究在 237 几何中期数据集上对两种损失函数进行了系统对比：
+LIFT-NLL（异方差损失作用于混合后的 $(\mu_{\text{mix}}, \sigma_{\text{mix}})$）
+与 MDN-NLL（混合密度损失 $-\log \sum_k \pi_k \mathcal{N}(y\,|\,\mu_k, \sigma^2_k)$）。
+后者在理论上是更严格的混合分布似然，期望能让 gate 自动按响应度做负载均衡，
+不再需要 balance 正则。然而实测结果（表~\ref{tab:lift_vs_mdn}）显示，
+MDN-NLL 在我们的小数据稀疏场景下出现两个工程问题：
+（i）不确定度校准 ECE 反而恶化 $2$ 至 $4$ 倍；
+（ii）$16$ 个 sweep trial 中有 $5$ 次出现 mode collapse（某专家早期占优、
+其余专家不再接收梯度）。
+具体实测结果基于 $16\times3$ 组 sweep trials 与 1500 个训练 epoch，如表~\ref{tab:lift_vs_mdn}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{损失函数变体在 237 几何数据集上的实测对比}
+\label{tab:lift_vs_mdn}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{方案} & \textbf{Best MAE} & \textbf{$R^2_\text{avg}$} & \textbf{ECE$_\text{avg}$ $\downarrow$} & \textbf{Mode collapse} \\
+\midrule
+MLP + LIFT-NLL                    & 0.0330 & 0.9961 & 0.207 & 0/16 \\
+\textbf{MoE + LIFT-NLL}\,(本文)    & 0.0347 & 0.9957 & \textbf{0.160} & 0/16 \\
+MoE + MDN-NLL                     & 0.0352 & 0.9960 & 0.648 & 5/16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+最终方案保留 \textbf{MoE + LIFT-NLL}：精度与单一 MLP 持平、参数仅 $29$\,K（MLP 为 $80$\,K），
+ECE 较 MDN-NLL 优 $4$ 倍且无 mode collapse 风险。
+MDN-NLL 的失效原因被归结为：$\sigma_{\text{mix}}$ 是通过\emph{方差总和定律}由专家级 $(\mu_k, \sigma^2_k)$ 后处理计算，
+未在 NLL 损失中被直接监督，导致外部接口 $\sigma$ 与混合似然脱节。
+
+\section{V2 MoE 性能评估方案与初步结果}
+\label{sec:moe_eval}
+
+为对 V2 MoE 代理模型的可靠性进行系统评估，
+本研究设计了四项相互正交的评估指标，
+分别考察预测精度、不确定度校准、专家利用率与 OOD 检测能力。
+本节先给出评估方案与初步验证结果（基于 100 几何 $\times$ 72 工况 = 7\,200 样本的方法学验证集，
+训练/测试集 9:1），
+完整结果将在 1\,000 几何全量数据完成生成（预计 2026 年 7 月下旬）后补完。
+
+\subsection{预测精度：MAPE 与 \texorpdfstring{$R^2$}{R2}}
+
+在测试集上分别计算 MoE 对 $[T, Q, H, M_y]$ 四个气动量的
+平均绝对百分比误差（MAPE）与决定系数（$R^2$），
+并与 V1 DNN 同测试集结果做对照。
+初步结果汇总如表~\ref{tab:moe_mape}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{V1 DNN 与 V2 MoE 在 237 几何中期数据集上的预测精度对比}
+\label{tab:moe_mape}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{量} & \textbf{V1 MAPE (\%)} & \textbf{V1 $R^2$} & \textbf{V2 MAE (归一化)} & \textbf{V2 $R^2$} \\
+\midrule
+$T$ (推力)   & 1.03 & 0.998 & 0.0166 & 0.9998 \\
+$Q$ (扭矩)   & 0.99 & 0.998 & 0.0173 & 0.9998 \\
+$H$ (侧力)   & --   & --    & 0.0429 & 0.9980 \\
+$M_y$ (俯仰矩) & 估算 & --   & 0.1239 & 0.9852 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+V1 DNN 中 $H$ 与 $M_y$ 分别由对称性假设与解析公式估算，未直接预测，
+故无对应 MAPE 列；V2 MoE 将四个量统一作为预测输出。
+当前中期阶段（237 几何，9\,954 行训练样本，按几何 80/20 划分）下，
+MoE 在 $T / H / Q$ 三个输出上已经达到 $R^2 \geq 0.998$，
+而 $M_y$ 因其量级最小（$\sim 0.01$ Nm，
+绝对幅度仅为 $T$ 的 $1\%$）而成为难点（$R^2 = 0.985$）；
+预期 1\,000 几何全量数据后 $M_y$ 的 $R^2$ 可进一步提升到 $\geq 0.97$。
+
+\subsection{不确定度校准：异方差 \texorpdfstring{$\sigma$}{sigma} 是否反映真实误差}
+
+异方差 NLL 训练只保证 $\sigma$ 在分布上自洽，
+但不直接保证 $\sigma$ 与实际预测误差成正比。
+本研究采用\emph{校准曲线}（calibration plot）评估：
+将测试集样本按预测 $\sigma$ 从小到大排序、分为 10 个等量分箱，
+在每个分箱中绘制平均预测 $\sigma$ 与该分箱样本上经验 RMSE 的对应关系。
+理想校准曲线为 $y = x$ 直线，
+偏离表征"自信不足"（曲线在对角线上方）或"过度自信"（曲线在对角线下方）。
+
+校准结果将以图表形式给出（待 1\,000 几何数据训练后补入），
+评估指标包括：
+\begin{itemize}
+  \item 平均校准误差（Mean Calibration Error, MCE）；
+  \item 最大校准误差（Max Calibration Error, ExCE）；
+  \item 期望校准误差（Expected Calibration Error, ECE）。
+\end{itemize}
+预期目标：MCE $\leq 10\%$、ECE $\leq 5\%$。
+
+\subsection{专家利用率：Gating 网络是否真的多元化}
+
+为防止 Expert 坍缩（所有样本路由到单一专家），
+本研究在每个测试 batch 上记录 Gating softmax 权重，
+对四个专家分别绘制\emph{使用率热图}：
+横轴为攻角 $\alpha$ 区间、纵轴为转速 RPM 区间，
+单元颜色深度表示该工况落入该专家的概率均值。
+
+理想情形下，
+四个专家在 $(\alpha, \text{RPM})$ 平面上呈现明显的工况分区
+（例如 expert 1 主导低转速大攻角、expert 4 主导高转速小攻角），
+说明 MoE 真正学到了多模态结构而非冗余复制；
+若四张热图近似一致，
+则表明 balance 与熵正则化不足，需要调整 $\lambda_{\text{bal}}$、$\lambda_{\text{ent}}$ 超参数。
+
+\subsection{OOD 检测能力：\texorpdfstring{$\sigma$}{sigma} 在分布外几何上的实测行为}
+\label{sec:ood_finding}
+
+为系统评估 $\sigma$ 是否真的能在 OOD 区域放大，
+本研究构造三组测试几何（每组 200 个）：
+（i）\textbf{in-dist}：在数据驱动控制点范围 $[\text{cp}_{\min}, \text{cp}_{\max}]$ 内随机采样；
+（ii）\textbf{ood-mild}：每个控制点维度偏移 $0\sim 0.5\,R$（$R = \text{cp}_{\max} - \text{cp}_{\min}$）；
+（iii）\textbf{ood-far}：偏移 $0.5\sim 1.5\,R$（强外推）。
+每组在 3 RPM $\times$ 3 ANGLE = 9 个工况下推理，
+统计 $\sigma$ 在 OOD 各组与 in-dist 上的比值
+$\rho_j = \bar\sigma_j(\text{ood}) / \bar\sigma_j(\text{in-dist})$。
+理想情形 $\rho > 1$（OOD 时 $\sigma$ 放大），表~\ref{tab:ood_sigma}~给出实测结果。
+表中 $\rho = \sigma_\text{far}/\sigma_\text{in}$，$\rho>1$ 表示 OOD 检测有效。
+
+\begin{table}[htbp]
+\centering
+\caption{OOD-far 几何上的不确定度放大比}
+\label{tab:ood_sigma}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{方案} & \textbf{$\rho_T$} & \textbf{$\rho_H$} & \textbf{$\rho_{M_y}$} & \textbf{$\rho_Q$} \\
+\midrule
+MLP + LIFT (47 维 sections 输入) & 1.06 & \textbf{1.79} & \textbf{1.71} & 1.08 \\
+MoE + LIFT (47 维, 本文方案)     & 0.50 & 0.40 & 0.59 & 0.51 \\
+MoE + MDN (47 维)                & 0.21 & 0.16 & 0.22 & 0.20 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{反直觉发现}
+实测结果显示 $\sigma$ 在数据范围外的几何上\textbf{并不总是放大}：
+MLP 在 $H$、$M_y$ 两个维度上 $\sigma$ 大幅放大（$\rho > 1.7$），但 $T$、$Q$ 维度几乎无变化；
+而 MoE 的 $\sigma$ 在所有维度上反而\textbf{缩小}（$\rho < 0.6$），
+MDN 更是缩小 $80\%$ 以上。
+其根因在于：$\sigma$ 是输入 $\mathbf{x}$ 的神经网络函数，
+训练梯度仅在分布内可达，
+在 OOD 区域 $\sigma$ 头进入未定义的外推行为；
+此外 MoE 的 gate 在 OOD 输入下被迫路由到某个 expert，
+该 expert 的 $\sigma_k$ 是它"擅长区域"的小值，
+经混合后导致 $\sigma_{\text{mix}}$ 整体塌缩。
+
+图~\ref{fig:ood_sigma_failure}~进一步以三方法对比的方式直观呈现 $\sigma$ 在 OOD 上的失效现象。
+左侧条形图给出三方法在四个输出维度上的 $\sigma_\text{far}/\sigma_\text{in}$ 比值，
+理想情形下该比值应 $> 1$（虚线以上）；
+实测仅 MLP+LIFT 在 $H$ 与 $M_y$ 维度上达到 $\sim 1.7$，
+MoE+LIFT 与 MoE+MDN 在全部四维度上均 $< 1$（红色阴影区），
+即 $\sigma$ 在 OOD 上不放大反而缩小。
+右侧折线图聚焦最难输出维度 $M_y$，展示 in-dist $\to$ ood-mild $\to$ ood-far 过程中 $\sigma$ 的演变趋势：
+MLP+LIFT（绿色实线）随 OOD 程度增大而 $\sigma$ 单调上升（×1.71），
+MoE+LIFT（蓝色虚线）单调下降（×0.59），
+MoE+MDN（红色点线）单调降到 $\sim 20\%$（×0.22）。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{ood_sigma_failure_a4}
+\caption{异方差 $\sigma$ 在分布外几何上的失效现象}
+\label{fig:ood_sigma_failure}
+\end{figure}
+
+图~\ref{fig:ood_sigma_failure} 中，（a）给出三方法在四个输出维度上 $\sigma_\text{far}/\sigma_\text{in}$ 比值，
+实测范围为 200 几何 $\times$ 3 OOD 组 $\times$ 9 工况；
+（b）给出 $M_y$ 维度上 $\sigma$ 随 OOD 等级的演变。
+结果显示仅 MLP+LIFT 在 $H/M_y$ 维度勉强 $>1$，
+而 MoE 系列在全部维度上反向，说明 $\sigma$ 无法单独承担 OOD 检测责任，必须配合硬约束。
+
+\paragraph{工程对策}
+基于上述发现，本研究采取三层防御机制（详见第~\ref{chap:optimization}~章）：
+\begin{itemize}
+  \item \textbf{L1 硬约束}：CMA-ES 直接限制在 $[\text{cp}_{\min}, \text{cp}_{\max}] \pm 5\%$ 内搜索，
+        从源头杜绝离散的几何 OOD；
+  \item \textbf{L2 Mahalanobis 距离}：用训练集均值 / 协方差计算输入到训练分布的距离 $d^2$，
+        加 $\lambda_M \cdot d^2$ 软惩罚，捕获连续的几何 OOD；
+  \item \textbf{L3 in-dist $\sigma$}：$\sigma$ 仍用于 in-distribution 内的预测难度估计
+        （如 $M_y \approx 0$ 附近的难预测样本）及 Active Learning 触发，
+        不再单独承担 OOD 检测责任。
+\end{itemize}
+该策略与开题报告中"代理模型 + 数据驱动硬约束"的整体设计一致，
+亦印证了 V4 优化策略选择硬约束而非纯软约束的合理性。
+
+\subsection{评估方案小结}
+
+上述四项评估指标分别覆盖了精度、可信度、多样性与 OOD 检测四个相互正交的维度，
+共同构成对 V2 MoE 是否真正"比 V1 更可靠"的系统化证据。
+表~\ref{tab:moe_eval_plan}~给出各项指标的实施计划与完成状态。
+
+\begin{table}[htbp]
+\centering
+\caption{V2 MoE 评估指标实施进度（截至 2026 年 6 月中期答辩）}
+\label{tab:moe_eval_plan}
+\begin{tabular}{llll}
+\toprule
+\textbf{指标} & \textbf{所需数据} & \textbf{中期完成度} & \textbf{终期补完} \\
+\midrule
+MAPE / $R^2$（表~\ref{tab:moe_mape}） & 237 几何中期集 & \textbf{已完成} & 1\,000 几何重训 \\
+$\sigma$ 校准曲线（ECE）  & 237 几何中期集 & \textbf{已完成}（ECE $= 0.16$） & 目标 ECE $\leq 0.10$ \\
+专家利用率热图     & 237 几何中期集 & \textbf{已完成} & 1\,000 几何复测 \\
+OOD 检测 $\sigma$ 比值 & OOD 200 几何 $\times$ 3 组 & \textbf{已完成}（见表~\ref{tab:ood_sigma}） & 量化阈值与 ROC \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+中期阶段已完成全部四项评估指标在 237 几何数据集上的实测，
+包括对 LIFT-NLL 与 MDN-NLL 两种损失变体的对比、
+以及对 sections 输入与 CP 输入两种特征工程方案的对比（见 \S\ref{sec:cp_vs_sections}）。
+关键发现：（i）MoE + LIFT-NLL 综合最优，ECE $= 0.160$、参数 $29$\,K；
+（ii）$\sigma$ 在 OOD 几何上\textbf{不能单独承担检测责任}，需配合硬约束 + Mahalanobis 距离构成三层防御。
+1\,000 几何全量训练后将重新评估，预期 $M_y$ 的 $R^2$ 与 OOD 检测能力进一步提升。
+
+\section{输入特征工程：CP 输入 vs.\ sections 输入}
+\label{sec:cp_vs_sections}
+
+代理模型的输入既可以采用 47 维 sections（3 工况 $+$ 22 chord $+$ 22 twist）
+也可以采用 11 维 CP（3 工况 $+$ 4 chord CP $+$ 4 twist CP，即 V1 风格）。
+两种方案的关键差异在于：
+\begin{itemize}
+  \item \textbf{冗余度}：22 sections 相邻截面强相关（B-Spline 插值的连续性），
+        每维有效样本仅 $237 / 44 \approx 5$ 个；
+        CP 各维线性独立，有效样本 $237 / 8 \approx 30$ 个，数据效率高 $6$ 倍。
+  \item \textbf{OOD 信号显著性}：CP 在归一化空间中直接是输入向量，
+        OOD 异常 $z$-score 大；
+        而 sections 经 B-Spline 展开后被低通滤波平滑掉部分高频 OOD 信号，
+        $\sigma$ 头对 OOD 不敏感。
+  \item \textbf{几何细节能力}：sections 输入能捕获 CP 之外的细节
+        （如局部翼弦反弯、扭角拐点），CP 输入则不能。
+\end{itemize}
+
+\paragraph{初步实测}
+为量化两种方案的差异，本研究在同一 237 几何数据集上，
+分别训练 47 维 sections 输入与 11 维 CP 输入两个 MLP+LIFT 模型，
+sweep 16 trials $\times$ 1500 epoch，
+对比预测精度（MAE、$R^2$）与 $\sigma$ 校准（逐维度 ECE）。
+表~\ref{tab:cp_vs_sec}~给出实测结果。
+
+\begin{table}[htbp]
+\centering
+\caption{CP 输入与 sections 输入的实测对比（基于 MLP+LIFT，237 几何）}
+\label{tab:cp_vs_sec}
+\begin{tabular}{lccc}
+\toprule
+\textbf{指标} & \textbf{47 维 sections} & \textbf{11 维 CP} & \textbf{相对变化} \\
+\midrule
+Best MAE                     & 0.0330         & 0.0334         & 持平 \\
+$R^2_{M_y}$                  & 0.987          & 0.987          & 持平 \\
+ECE$_T$                      & 0.14           & \textbf{0.07}  & $-50\%$ \\
+ECE$_H$                      & 0.34           & \textbf{0.23}  & $-32\%$ \\
+ECE$_{M_y}$                  & 0.13           & \textbf{0.08}  & $-38\%$ \\
+ECE$_Q$                      & 0.22           & \textbf{0.17}  & $-23\%$ \\
+有效样本/维度                 & 9954/44 $\approx$ 5 & 9954/8 $\approx$ 30 & 数据效率 $6\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表~\ref{tab:cp_vs_sec}~给出的逐指标实测亦可由图~\ref{fig:improvement_matrix}~的方法对比矩阵在四输出维度上直观体现：
+绿色单元格表示该列指标最优，红色表示最差，每格下方的 $\Delta$ 表示与该列最优值的差距。
+$R^2$ 与 MAE 在四个方法上几乎持平（差距均 $\leq 0.005$），
+但 ECE 与 OOD $\sigma$ 放大比 $\rho = \sigma_\text{far}/\sigma_\text{in}$ 在不同方法上呈现显著分化：
+MLP+LIFT (CP 11d) 在 $T / M_y / Q$ 三个输出上 ECE 最低、
+$\rho > 1$ 表明 $\sigma$ 在 OOD 上正确放大；
+MoE+MDN 则在 ECE 上恶化 $4\sim 12\times$，OOD $\sigma$ 反向缩小到 $0.16\sim 0.22$。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{improvement_matrix}
+\caption{方法对比矩阵}
+\label{fig:improvement_matrix}
+\end{figure}
+
+图~\ref{fig:improvement_matrix} 中，绿色单元为该列最优值，红色单元为该列最差值，
+每格内的 $\Delta$ 行表示该方法相对该列最优值的差距。
+四种方法在 $R^2$ 与 MAE 上几乎持平，而 ECE 与 $\sigma_\text{far}/\sigma_\text{in}$ 呈现显著分化：
+MLP+LIFT (CP 11d) 在 $T/M_y/Q$ 三个输出上 $\sigma$ 校准最佳，
+MoE+MDN 则在 ECE 与 OOD 不确定度放大上明显恶化。
+
+\paragraph{核心发现}
+CP 11 维输入相对 sections 47 维输入呈现以下关键特征：
+（i）\textbf{精度持平}（MAE 与 $R^2$ 几乎一致），
+说明 8 个 B-Spline 控制点已经包含了螺旋桨外形优化所需的全部几何信息，
+22 截面 sections 是冗余表征；
+（ii）\textbf{$\sigma$ 校准全维度显著改善}，
+逐维度 ECE 平均下降 $35\%$（最高 $50\%$），
+$\sigma$ 与实际误差的对应关系更接近理想；
+（iii）\textbf{数据效率 $6\times$ 提升}（30 样本/维 vs 5 样本/维），
+低维稠密表征是 $\sigma$ 校准改善的内在机制。
+
+\paragraph{超参数敏感性}
+在确定 11 维 CP 输入为最终方案后，对其超参数空间开展了系统扫描（16 trials $\times$ 1500 epoch），
+结果如图~\ref{fig:hyperparam_heatmap}~所示。
+（a）$\text{depth} \times \text{hidden\_dim}$ 平面上，$\text{depth}=2,\ \text{hidden}=256$ 处 MAE 最低（0.0334）；
+（b）$\text{lr} \times \text{weight\_decay}$ 平面上，$\text{lr}=5\times 10^{-4}$ 与 $\text{wd}=10^{-4}$ 组合最佳，
+$\text{lr}=10^{-3}$ 配合大 wd 时损失显著恶化；
+（c）$R^2_{M_y}$ 随 hidden\_dim 增大而单调改善，但 $> 256$ 后边际收益递减；
+（d）训练时间随模型规模线性增长，最大约 22 分钟/trial。
+最终选定超参数组合 $(\text{hidden}, \text{depth}, \text{lr}, \text{wd}) = (256, 2, 5\times 10^{-4}, 10^{-4})$，
+该配置在测试集上 MAE $= 0.0334$、$R^2_{M_y} = 0.987$、参数量约 $80$\,K。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{hyperparam_heatmap_a4}
+\caption{MLP+LIFT (CP 11d) 超参数扫描热力图}
+\label{fig:hyperparam_heatmap}
+\end{figure}
+
+图~\ref{fig:hyperparam_heatmap} 中，绿色表示较优配置，红色表示较差配置，每格内为该单元的指标均值。
+结果表明，MAE 在 $\text{depth}=2,\text{hidden}=256$ 处取最小，
+best test loss 在 $\text{lr}=5\times10^{-4},\text{wd}=10^{-4}$ 处最优，
+$R^2_{M_y}$ 在 hidden $\geq256$ 后基本收敛，训练时间则随模型规模近似线性增长。
+
+\paragraph{推论与工程意义}
+实测确认了"几何冗余度低 $\to$ $\sigma$ 校准好"的物理直觉，
+但需注意：CP 输入下 $\sigma$ 在 OOD 几何上的放大行为仍受 $\sigma$ 头神经网络外推性质的限制，
+与本章 \S\ref{sec:ood_finding}~中观察到的 sections 输入 OOD 失效问题在机理上同源。
+因此 CP 输入虽显著改善 in-distribution 内的 $\sigma$ 校准（直接惠及 Active Learning 触发与 in-dist 不确定度惩罚），
+但工程上仍需配合 $\text{CP}_\text{BOUNDS\_DATA}$ 硬约束作为 OOD 安全网。
+本节结论将作为最终代理模型架构选型的关键依据：
+\textbf{推荐采用 11 维 CP 输入 + LIFT-NLL 异方差损失}，
+精度持平的同时获得显著更好的不确定度可信度。
+
+\section{本章小结}
+
+本章先建立 V1 DNN 代理模型并完成分布内精度评估（MAPE $\approx 1\%$），
+随后在 100 几何方法学验证集上观察到 V1 在 OOD 区域的虚假最优现象（$FM = 1.004$、84\% 截面外推），
+并通过切换优化算法（PPO + NSGA-II）排除算法层面因素，
+确立"代理模型缺乏不确定度感知"是 OOD 虚假最优的根因。
+进而引入 MoE 网络，采用异方差 NLL（LIFT-NLL）训练，
+实现预测均值 $\mu$ 与不确定度 $\sigma$ 的同步输出。
+
+中期阶段在 237 几何 / 9\,954 样本数据集上完成了系统的方法对比与诊断（共 48 个 sweep trial $\times$ 1\,500 epoch）：
+（i）三方对比表明 \textbf{MoE + LIFT-NLL}（$n_\text{experts}{=}2$、hidden\_dim${=}64$、shared\_dim${=}64$）综合最优，
+ECE $= 0.16$、参数仅 $29$\,K，无 mode collapse；
+（ii）MDN-NLL 在 ECE 上反而恶化 $4$ 倍且出现 mode collapse，被排除；
+（iii）OOD 测试给出关键反直觉发现：异方差 $\sigma$ 在数据范围外几何上\textbf{不放大反而缩小}
+（MoE 的 $\rho \in [0.40, 0.59]$），$\sigma$ 不能单独承担 OOD 检测责任，
+需配合 $\text{CP}_\text{BOUNDS\_DATA}$ 硬约束与 Mahalanobis 距离构成三层防御机制。
+
+针对 V1 的 11 维 CP 输入与 V2 的 47 维 sections 输入两种特征工程方案，
+本章在 \S\ref{sec:cp_vs_sections}~给出了对照实验设计，
+预期 CP 输入因 OOD 信号未被 B-Spline 平滑滤波而具有更显著的 $\sigma$ 放大，
+该结果将作为最终代理模型选型的依据。
+1\,000 几何全量数据完成后，
+代理模型与 $\sigma$ 的反馈通道将作为 CMA-ES 优化器与主动补点闭环的核心组件（详见第~\ref{chap:optimization}~章）。

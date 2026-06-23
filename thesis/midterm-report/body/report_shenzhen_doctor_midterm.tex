@@ -1,0 +1,324 @@
+% !Mode:: "TeX:UTF-8"
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 哈尔滨工业大学（深圳）硕士学位论文中期检查报告
+% 课题：基于代理模型的复杂风场内无人机螺旋桨气动外形优化
+% 技术路线：LLFVW 高保真仿真 → MoE 代理模型 → CMA-ES 配平约束优化
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% section 后有*表示不需要画横线
+\section{论文工作是否按开题报告预定的内容及进度安排进行}*
+
+本课题《基于代理模型的复杂风场内无人机螺旋桨气动外形优化》自 2024 年 9 月通过开题答辩以来，
+围绕开题报告中规划的四项研究任务有序推进：
+（T1）LLFVW 高保真气动仿真数据生成；
+（T2）DNN 气动代理模型构建；
+（T3）PPO 在线调参的 NSGA-II 多目标优化；
+（T4）Star-CCM+ CFD 高保真验证与可视化分析。
+其中 T1、T4 按计划完成或就绪；
+T2、T3 在执行过程中由于发现代理模型的\emph{分布外（Out-of-Distribution，OOD）外推陷阱}，
+对原技术路线进行了系统性调整，
+将代理模型从单 MLP 升级为\textbf{混合专家网络（Mixture of Experts, MoE）}并引入不确定度量化，
+将优化算法从 PPO + NSGA-II 调整为\textbf{CMA-ES 配合数据驱动硬约束}，
+并新增了开题报告中未规划的\textbf{三轴配平约束求解器}。
+
+经过上述方法迭代，最终版本（V4）在分布外样本上保持 0/44 截面 OOD 的可信优化结果，
+品质因数 $FM=0.947$，相比基线 APC 10$\times$7 螺旋桨实现明显改进。
+整体上看，关键方法学突破已经完成，论文撰写时间节点（2026.09--2026.11）未受影响。
+具体的研究内容完成情况、方法调整原因及与开题计划的对比见后续各节。
+
+\section{目前已完成的研究工作及结果}
+
+\subsection{LLFVW 仿真平台搭建（对应任务 T1）}
+
+\textbf{B-Spline 参数化建模。}
+采用 8 个控制点（4 个 chord + 4 个 twist）、阶次 $\text{degree}=3$ 的 B-Spline 曲线，
+将连续的螺旋桨弦长和扭转角分布插值到 22 个径向截面，
+进而生成三维螺旋桨几何。
+该参数化方案在 APC 10$\times$7 基准桨上的拟合验证已通过。
+
+\textbf{LLFVW 气动理论求解器。}
+基于自由尾涡的升力线方法（Lifting Line Free Vortex Wake, LLFVW），
+通过 Biot-Savart 定律计算诱导速度，配合无穿透边界条件构建 $N \times N$ 线性方程组，
+经 Kutta-Joukowski 定理得到气动力。
+仿真共 1000 个时间步，取后 120 步进行周期平均以消除瞬态影响。
+
+\textbf{自动化仿真框架。}
+以 Python 驱动 QBlade Community Edition v2.0.8.6 的 SIL 接口（Linux \texttt{.so} / Windows \texttt{.dll}），
+跨平台部署于 Ubuntu（GPU 加速）与 Windows，
+实现 \texttt{.sim} 文件批量生成 $\rightarrow$ 仿真执行 $\rightarrow$ 结果提取 $\rightarrow$ 数据入库的全流程自动化，
+\texttt{batch-size}=1 即时落盘 pkl 文件以防中断丢失。
+
+\textbf{UIUC 数据库两级验证（Dantsker 2022）。}
+\begin{itemize}
+  \item \emph{翼型层级（2D）：}对 E374 / NACA6409 翼型采用 XFoil 251 点离散，
+        在 $Re=10^5 \sim 3\times 10^5$ 范围内，
+        小攻角下 $C_l$、$C_d$ 与 UIUC 风洞数据一致。
+  \item \emph{螺旋桨层级（3D）：}对 APC 10$\times$7 桨在 $\text{RPM}\in[4007, 6519]$ 范围内进行 140 组工况对照，
+        推力系数 $C_T$、功率系数 $C_P$、效率 $\eta$ 相对误差均 $\leq 10\%$。
+\end{itemize}
+
+\textbf{网格收敛性与时间分辨率。}
+翼型采用 251 点标准网格、螺旋桨采用 3$^\circ$ / 步 $\times$ 1000 步设置，
+均通过网格无关性与时间无关性验证。
+
+\subsection{代理模型：DNN $\rightarrow$ MoE 演进（对应任务 T2）}
+
+\textbf{V1 实现：单 MLP DNN。}
+输入 47 维特征（3 个工况参数 + 22 个径向截面 $\times$ chord + 22 个 $\times$ twist），
+隐藏层结构 $[64, 128, 64]$，ReLU 激活，Dropout 0.001，
+输出 $F_x$、$F_y$、$F_z$、$\text{Torque}$ 四维气动力/力矩。
+采用 MSE 损失、Adam 优化器、CosineAnnealing 学习率调度，训练 5000 epochs。
+在 100 几何 $\times$ 72 工况 = 7200 样本（训练/测试 9:1）上：
+$F_x$ MAPE = 1.03\%，$F_z$ = 1.50\%，$\text{Torque}$ = 0.99\%。
+
+\textbf{核心问题：分布内精度高 $\neq$ 外推可靠。}
+在 V1 DNN 上直接执行无约束 CMA-ES 优化得到 $FM=1.004$（物理不可能值），
+诊断发现：twist 100\% 截面、chord 68\% 截面落入训练分布之外，
+RPM 外推 +1455（超出训练区间 $[4000, 6500]$）；
+切换 PPO 也得到 $FM=0.899$ 但 OOD 同样不可控，
+说明问题根因不在优化算法，而在\textbf{代理模型缺乏不确定度感知}。
+
+\textbf{V2 实现：MoE 代理模型。}
+重构架构为：Shared Encoder（$47 \rightarrow 64$，BatchNorm + ReLU）
+$+$ Gating Network（$64 \rightarrow K$，softmax 权重）
+$+$ $K=4$ Experts（各 $64 \rightarrow 128 \rightarrow 8$，输出 $[\mu_4 + \log\sigma_4]$），
+最终输出 $[T, H, M_y, Q]$ 四维气动量及其异方差不确定度 $[\sigma_T, \sigma_H, \sigma_{M_y}, \sigma_Q]$。
+混合方差按 $\sigma^2 = \sum_k \pi_k (\sigma_k^2 + \mu_k^2) - \mu^2$ 合成。
+相比 V1 DNN 的核心改进：
+\begin{itemize}
+  \item 异方差 NLL 损失自动学习输入相关的预测不确定度；
+  \item $M_y$ 由 MoE 直接预测，不再使用解析估算 $k_m \cdot T \cdot R \cdot \mu$；
+  \item Balance 正则 + 熵正则化防止 Expert 坍缩；
+  \item 输入维度由 11 扩展至 47，引入 22 截面的完整几何分布。
+\end{itemize}
+
+\textbf{方案选择理由（MoE vs. MC-Dropout vs. Ensemble）。}
+MoE 单次前向同时给出 $\mu$ 与 $\sigma$，
+非常契合 CMA-ES 在每一代 $16 \times 200$ 次评估的吞吐要求；
+Gating 网络天然适配多工况分区；
+异方差 NLL 学到的是输入相关的不确定度，
+比 MC-Dropout 的 $T$ 次采样和 Ensemble 的 $N$ 次前向都更高效。
+
+\subsection{V1 $\rightarrow$ V4 迭代：从虚假最优到可信优化}
+
+围绕 OOD 外推陷阱，对优化流程进行了四轮迭代，结果汇总如表~\ref{tab:v1v4}~所示。
+
+\begin{table}[htbp]
+\centering
+\caption{V1$\rightarrow$V4 优化方案迭代对比}
+\label{tab:v1v4}
+\begin{tabular}{cccccccc}
+\toprule
+版本 & 优化器 & 约束策略 & $FM$ & 功率（W） & 几何 OOD & 可信度 \\
+\midrule
+V1 & CMA-ES & 无约束 & 1.004 & 342 & 37/44 (84\%) & $\star$ \\
+V1 & PPO & 无约束 & 0.899 & 382 & OOD & $\star$ \\
+V3 & CMA-ES & OOD 软惩罚 & 0.941 & 365 & 15/44 (34\%) & $\star\star$ \\
+V4 & CMA-ES & 硬约束（数据驱动） & \textbf{0.947} & 363 & \textbf{0/44} & $\star\star\star$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{V4 最优解：}
+$FM = 0.9469$，$P_{\text{elec}} = 362.7$ W，
+chord 控制点 $\mathrm{CP} = [0.0136, 0.0438, 0.0198, 0.0048]$，
+twist 控制点 $= [37.4^\circ, 13.5^\circ, 11.3^\circ, 8.5^\circ]$，
+所有 44 个控制点均落在训练分布内。
+
+\textbf{配平约束求解器（开题报告中未规划）。}
+前后桨差速配平要求满足三轴平衡：$F_x = 0$、$F_z = mg$、$M_y = 0$，
+求解未知量 $[\alpha, \Omega_1, \Omega_2]$（迎角与前后桨转速），
+约束范围 $\text{RPM} \in [4000, 6500]$、$\alpha \in [2^\circ, 8^\circ]$。
+V1 单初值收敛率仅 3\%，V2 改用多初值 $\times 6$ 后收敛率达到 100\%。
+$M_y$ 由 MoE 直接预测，相比解析估算更贴合真实气动响应。
+
+\subsection{辅助模块：Mann 风场建模与 CFD 验证模板（对应任务 T4）}
+
+\textbf{Mann 复杂风场建模。}
+基于 Mann 模型（频谱表示 + 随机相位法）生成符合 IEC 61400 标准的三维湍流风场，
+关键参数：风场盒子 $20\text{m} \times 1\text{m} \times 1\text{m}$，
+高度 10 m，
+网格 $631 \times 256 \times 256$，
+积分尺度 $L_{\text{MANN}} = 15$ m，
+各向异性 $\Gamma = 3.9$，
+$\alpha\varepsilon = 0.0660$，
+参考风速 12 m/s，
+NTM 模型 $\text{TI} = 16$，
+方差缩放 $(1.10, 0.80, 0.48)$。
+
+\textbf{CFD 验证模板（Star-CCM+）。}
+计算域：入口 / 出口各 10$D$，总宽 25$D$；
+旋转域：直径 1.2$D$、宽 0.4$D$；
+网格量约 700 万，阻塞比 2.5\%；
+湍流模型 SST $k$-$\omega$；
+$y^+ \in [0, 1]$ 满足壁面分辨率要求；
+精度目标 $C_P$、$C_T$、$\eta$ 误差 $\leq 5\%$。
+
+\textbf{验证策略调整。}
+开题报告中 CFD 作为主要终验手段；
+当前调整为以 QBlade LLFVW 回验为主（与训练数据同源、闭环更快），
+CFD 模板保留为辅助高保真验证，模板已就绪可随时启用。
+
+\subsection{当前进展：LLFVW 数据集扩展 $100 \rightarrow 1000$ 几何}
+
+为支撑 MoE 训练所需的样本规模，已在 GPU 平台上启动 1000 几何 $\times$ 42 工况
+（6 RPM $\times$ 7 Angle、Wind = 10 m/s）的全量数据生成，总样本量 42K。
+设计变量按 LHS（拉丁超立方抽样，$d=8$、$\text{seed}=42$）在 baseline $\pm 30\%$ 范围内采样，
+落盘策略 \texttt{batch-size}=1（逐几何即时保存 pkl）以防中断丢失。
+
+\textbf{GPU 加速效果：}
+停止 CPU 并行后 GPU（RTX 3060，OpenCL）独占资源，
+单几何仿真耗时从 3.5 h 降至 1.1 h（3.2$\times$ 提速），
+吞吐量由 $\sim$6 几何/天提升至 $\sim$21 几何/天。
+
+\textbf{时间预估：}
+geom 710--999 段约 13 天，预计 2026-06-20 完成；
+geom 0--709 段约 33 天，预计 2026-07-23 完成；
+全量 1000 几何预计 2026 年 7 月下旬完成。
+
+\textbf{滚动启动策略：}
+300+ 几何完成后即启动 MoE 初步训练，
+先行验证架构与调参流程，
+后续数据补齐后采用增量微调，可节省 2--3 周等待时间。
+
+\section{后期拟完成的研究工作及进度安排}
+
+依据当前实际进展，后续研究工作分为以下六个阶段推进，
+详见表~\ref{tab:future_plan}~。
+
+\begin{table}[htbp]
+\centering
+\caption{后续研究工作进度安排}
+\label{tab:future_plan}
+\begin{tabular}{ll}
+\toprule
+\textbf{时间节点} & \textbf{研究内容} \\
+\midrule
+2026.06 进行中 & 1000 几何 LLFVW 数据生成（GPU $\sim$21 几何/天） \\
+2026.07 上旬 & \texttt{data.py} 转换 pkl$\rightarrow$CSV，MoE 训练（K-fold 验证，300+ 几何先行） \\
+2026.07 下旬 & CMA-ES 优化闭环：不确定度引导主动补点，迭代收敛 \\
+2026.08 & QBlade 回验 + Star-CCM+ CFD 辅助验证，最优几何全工况回验 \\
+2026.08--09 & 结果分析：基线 vs.\ 优化桨对比、灵敏度分析 \\
+2026.09--11 & 论文撰写（5--6 万字）与答辩准备 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{已完成里程碑：}
+$\checkmark$ LHS 1000 几何采样设计；
+$\checkmark$ QBlade Linux GPU 部署；
+$\checkmark$ V2 管线代码完成（MoE + Trim + CMA-ES）；
+$\checkmark$ batch-size=1 防丢失策略。
+
+\textbf{进行中里程碑：}
+$\bullet$ 全量数据生成。
+
+\textbf{待执行里程碑：}
+$\circ$ pkl$\rightarrow$CSV 批量转换；
+$\circ$ MoE 真实数据训练；
+$\circ$ CMA-ES 优化 + 主动补点闭环。
+
+\section{存在的困难与问题}
+
+\begin{enumerate}
+  \item \textbf{数据生成周期长。}
+        1000 几何 $\times$ 42 工况的全量 LLFVW 仿真预计耗时约 47 天，
+        是 MoE 训练的关键路径瓶颈。
+        \emph{应对方案：}
+        采用滚动训练策略，300+ 几何子集到位即启动 MoE 初步训练；
+        数据补齐后采用增量微调，可节省 2--3 周等待时间。
+  \item \textbf{MoE 过拟合风险。}
+        $K=4$ Experts $\times$ 双头（$\mu$、$\log\sigma$）输出，
+        参数量较大，存在过拟合风险。
+        \emph{应对方案：}
+        K-fold 交叉验证 + 早停（early stopping）+ Balance 正则化 + 熵正则化，
+        防止 Expert 坍缩。
+  \item \textbf{优化解持续命中边界。}
+        若 CMA-ES 收敛到 B-Spline 控制点范围边界，
+        说明当前采样范围不足以覆盖最优区域。
+        \emph{应对方案：}
+        扩大 CP 范围；
+        利用 MoE 输出的不确定度 $\sigma$ 进行主动补点采样，
+        在高 $\sigma$ 区域追加 LLFVW 仿真。
+  \item \textbf{LLFVW 与 CFD 之间存在系统性偏差。}
+        $\sim$10\% 的低保真模型误差可能影响 CMA-ES 收敛方向。
+        \emph{应对方案：}
+        在最优解附近布置 3--5 个多保真度验证点（CFD 校准），
+        构造低保真到高保真的校正项；
+        必要时引入 Co-Kriging 进行多保真度数据融合。
+\end{enumerate}
+
+\section{如期完成全部论文工作的可能性}*
+
+综合方法论突破、数据生成进度与支撑条件，按期完成论文具备以下条件：
+
+\begin{enumerate}
+  \item \textbf{方法学突破已经完成。}
+        OOD 外推陷阱的诊断、MoE + 不确定度量化、CMA-ES + 配平嵌套约束
+        这三个核心方法学问题均已通过 V1$\rightarrow$V4 的迭代解决，
+        V4 在合成数据上得到 $FM=0.947$、0/44 OOD 的可信优化结果，
+        证明整套技术路线可行。
+  \item \textbf{支撑代码已经就位。}
+        V2 管线（LLFVW 自动化框架、MoE 模型、CMA-ES + 配平、主动补点）
+        及 CFD 验证模板均已实现，
+        无需再投入新增的方法学开发工作；
+        剩余工作主要是数据驱动训练 + 优化执行 + 结果分析 + 论文撰写。
+  \item \textbf{计算资源充分。}
+        Linux GPU 平台（RTX 3060）已部署完成，
+        当前吞吐量 21 几何/天，
+        Star-CCM+ 验证模板已就绪，
+        课题受深圳市科技重大专项（KJZD20230923115210021）支持，
+        计算与软件资源齐备。
+  \item \textbf{风险均有应对预案。}
+        对数据生成周期、MoE 过拟合、解触边界、多保真度偏差等四项风险，
+        均已设计具体可行的应对方案。
+\end{enumerate}
+
+\textbf{创新点总结：}
+\begin{enumerate}
+  \item \emph{MoE 代理模型 + 不确定度量化。}
+        相对 Wu (2024) 等单 MLP / Kriging 无可信度输出的工作，
+        本文采用 $K=4$ 混合专家 + 异方差 NLL，伴随输出 $\sigma$；
+        V1 MLP 在 OOD 区域的 $FM=1.004$ 虚假预测验证了方法必要性。
+  \item \emph{前飞差速配平嵌套优化。}
+        相对 Klimczyk (2022) 等仅优化悬停工况、不涉及配平的工作，
+        本文在 CMA-ES 每次评估中嵌套三轴配平 $[\alpha, \Omega_1, \Omega_2]$，
+        多初值 $\times 6$ 实现 100\% 收敛，结果物理可实现。
+  \item \emph{OOD 感知 + 主动补点闭环。}
+        相对 Tao (2019) 等假设代理模型全域可靠的工作，
+        本文实证了 OOD 陷阱（84\% 截面外推 $\rightarrow$ 虚假最优），
+        并通过硬约束 + $\sigma$ 引导主动补点形成闭环：
+        优化 $\rightarrow$ $\sigma$ 超阈值 $\rightarrow$ 补采 LLFVW $\rightarrow$ 重训 $\rightarrow$ 再优化。
+\end{enumerate}
+
+综上，本课题可在 2026 年 11 月之前完成全部研究内容、硕士学位论文撰写与最终答辩。
+
+%%%%%%% 签字部分 %%%%%%%
+\section*{指导教师意见：}
+
+\vspace{60bp}
+
+\vspace{24bp}
+\hfill 指导教师签名：\hspace{8\ccwd}
+
+\vspace{24bp}
+\hfill 年\hspace{2\ccwd}月\hspace{2\ccwd}日
+
+\section*{检查小组意见：}
+
+\vspace{60bp}
+
+\vspace{24bp}
+\hfill 组长（签字）：\hspace{8\ccwd}
+
+\vspace{24bp}
+\hfill 年\hspace{2\ccwd}月\hspace{2\ccwd}日
+
+%%%%%% 参考文献 %%%%%%
+\bibliographystyle{hithesis}
+\bibliography{reference}
+
+% Local Variables:
+% TeX-master: "../report"
+% TeX-engine: xetex
+% End:
