@@ -1,0 +1,808 @@
+% !TEX root = ../report.tex
+
+\section{论文工作是否按开题报告预定的内容及进度安排进行}
+
+\subsection{主要研究内容}
+随着低空经济发展，小型无人机在城市低空场景广泛承担巡航、配送等任务，小型无人机推进效率与续航能力密切相关，螺旋桨气动外形优化具有明确的工程应用价值。本课题来源于深圳市科技重大专项"基于数字孪生的城市低空环境仿真建模与动态监测关键技术"（项目编号：KJZD20230923115210021），围绕"基于代理模型的无人机螺旋桨前飞工况气动外形优化"展开，面向小型无人机在低空巡航任务中的推进效率提升问题。
+
+\subsubsection*{优化问题定义}
+
+本文求解如下带约束的桨叶外形优化问题：
+\begin{equation}
+  \min_{\mathbf{x}\in\mathbb{R}^8}\; J(\mathbf{x}) = \frac{P_\text{elec}(\mathbf{x},\,V)}{V}
+  \label{eq:opt_obj}
+\end{equation}
+\begin{equation}
+  \text{s.t.}\quad
+  \begin{cases}
+    F_x\!\left(\alpha,\Omega_f,\Omega_r;\,\mathbf{x}\right) = 0 \\[2pt]
+    F_z\!\left(\alpha,\Omega_f,\Omega_r;\,\mathbf{x}\right) = 0 \\[2pt]
+    M_y\!\left(\alpha,\Omega_f,\Omega_r;\,\mathbf{x}\right) = 0
+  \end{cases}
+  \quad\mathbf{x}_\text{lb} \leq \mathbf{x} \leq \mathbf{x}_\text{ub},
+  \quad \left\|\bm{\sigma}(\mathbf{x})\right\|_\infty \leq \sigma_\text{max}
+  \label{eq:opt_constraints}
+\end{equation}
+
+各符号含义如下：设计变量 $\mathbf{x} \in \mathbb{R}^8$ 为 B-Spline 控制点向量（弦长 $\times$4 + 扭转 $\times$4）；优化目标 $J(\mathbf{x})$ 为单位航程电功率消耗（W$\cdot$s/m），其最小化等价于最大化续航里程 $R = E_b \cdot V / P_\text{elec}$，其中 $E_b$ 为电池能量（J），$P_\text{elec} = P_\text{aero}/\eta$ 为总电功率（$\eta$ 为电机/电调综合效率）；巡航速度 $V$ 取 10 m/s。三方程约束为纵向前飞配平条件，$F_x$、$F_z$ 分别为机体系下前飞方向与升力方向合力，$M_y$ 为纵向合力矩，未知量为机身迎角 $\alpha$（rad）、前桨转速 $\Omega_f$（rad/s）和后桨转速 $\Omega_r$（rad/s）。$\mathbf{x}_\text{lb},\,\mathbf{x}_\text{ub}$ 为控制点几何边界，由训练数据拉丁超立方采样范围确定；$\bm{\sigma}(\mathbf{x}) \in \mathbb{R}^4$ 为代理模型对四维气动量 $[T,H,M_y,Q]$ 的预测不确定度，$\sigma_\text{max}$ 为可信度阈值，超出时视为代理模型外推区域。
+
+目标函数 $J$ 需通过 MoE 代理模型近似计算——直接调用 LLFVW 仿真每次耗时数分钟，CMA-ES 迭代数千次不可行。代理模型的点预测精度与不确定度 $\bm{\sigma}$ 的可靠性共同决定最终优化结果的质量，是本文重点解决的核心问题。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance = 6mm and 0mm,
+    box/.style = {rectangle, rounded corners=3pt, draw, fill=white,
+                  text width=11cm, minimum height=9mm,
+                  align=left, font=\small},
+    arr/.style = {-Stealth, thick}
+  ]
+    \node[box] (n1) {%
+      螺旋桨参数化建模\quad
+      基于 B-Spline 对桨型几何进行低维参数化表达，构建覆盖桨叶扭转、弦长与翼型分布的设计空间};
+    \node[box, below=of n1] (n2) {%
+      前飞工况气动仿真\quad
+      调用 QBlade/LLFVW 自动计算不同几何参数与来流速度组合下的推力、法向力、扭矩和俯仰力矩};
+    \node[box, below=of n2] (n3) {%
+      无人机整体配平求解\quad
+      嵌入力/力矩平衡方程，联合求解前飞迎角与前后桨差速，确保优化解满足飞行可行性约束};
+    \node[box, below=of n3] (n4) {%
+      基于代理模型的优化搜索\quad
+      采用 CMA-ES 进化策略在参数化设计空间中搜索最优桨型，以最大化巡航推进效率为目标};
+    \node[box, below=of n4] (n5) {%
+      带不确定性的代理模型预测\quad
+      训练同步输出预测均值与置信区间的神经网络，为优化提供目标函数近似与风险感知};
+    \node[box, below=of n5] (n6) {%
+      高保真流场验证\quad
+      在 Star-CCM+ 中开展三维 CFD 仿真，从流场层面确认气动性能提升并分析桨尖涡等关键特征};
+    \draw[arr] (n1) -- (n2);
+    \draw[arr] (n2) -- (n3);
+    \draw[arr] (n3) -- (n4);
+    \draw[arr] (n4) -- (n5);
+    \draw[arr] (n5) -- (n6);
+  \end{tikzpicture}
+  \caption{研究内容流程}
+  \label{fig:research_flow}
+\end{figure}
+
+研究内容具体涵盖六个方向，各方向按技术依赖关系依次推进，如图~\ref{fig:research_flow} 所示。调整后的整体技术路线如图~\ref{fig:whole_structure} 所示。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance = 5mm and 14mm,
+    % 样式定义
+    stage/.style  = {rectangle, rounded corners=4pt, draw, minimum width=3.2cm,
+                     minimum height=8mm, align=center, font=\small},
+    detail/.style = {rectangle, rounded corners=2pt, draw=gray, fill=gray!8,
+                     text width=5.6cm, minimum height=8mm,
+                     align=left, font=\footnotesize},
+    arr/.style    = {-Stealth, thick},
+    darr/.style   = {-Stealth, thick, gray},
+  ]
+    % ---- 左侧主流程 ----
+    \node[stage, fill=blue!10]   (s1) {B-Spline 参数化建模};
+    \node[stage, fill=blue!10,  below=of s1] (s2) {QBlade/LLFVW 气动仿真};
+    \node[stage, fill=green!12, below=of s2] (s3) {代理模型训练};
+    \node[stage, fill=orange!15,below=of s3] (s4) {前飞整体配平求解};
+    \node[stage, fill=orange!15,below=of s4] (s5) {CMA-ES 优化搜索};
+    \node[stage, fill=red!10,   below=of s5] (s6) {Star-CCM+ 高保真验证};
+
+    % ---- 右侧说明框 ----
+    \node[detail, right=of s1] (d1)
+      {8 维控制点（弦长 $\times$4 + 扭转 $\times$4）\\
+       B-Spline 插值 $\rightarrow$ 径向分布 $c(r),\,\theta(r)$};
+    \node[detail, right=of s2] (d2)
+      {11 维输入（3 工况 + 4 弦长 CP + 4 扭转 CP）\\
+       输出：$T,\,H,\,Q,\,M_p^y$（单桨）};
+    \node[detail, right=of s3] (d3)
+      {MoE + LIFT-NLL 不确定性输出\\
+       当前汇总 508 个几何，正式 32 组扫参进行中};
+    \node[detail, right=of s4] (d4)
+      {未知量：$\alpha,\,\Omega_\text{front},\,\Omega_\text{rear}$\\
+       scipy hybr 多初值求解，残差 $<10^{-3}$};
+    \node[detail, right=of s5] (d5)
+      {目标：最小化 $P_\text{elec}/V$\\
+       约束：配平可行 + 几何边界};
+    \node[detail, right=of s6] (d6)
+      {RANS $k$-$\omega$ SST，滑移网格\\
+       验证推力、扭矩与桨尖涡结构};
+
+    % ---- 主流程箭头 ----
+    \draw[arr] (s1) -- (s2);
+    \draw[arr] (s2) -- (s3);
+    \draw[arr] (s3) -- (s4);
+    \draw[arr] (s4) -- (s5);
+    \draw[arr] (s5) -- (s6);
+
+    % ---- 说明框连线 ----
+    \draw[darr] (s1.east) -- (d1.west);
+    \draw[darr] (s2.east) -- (d2.west);
+    \draw[darr] (s3.east) -- (d3.west);
+    \draw[darr] (s4.east) -- (d4.west);
+    \draw[darr] (s5.east) -- (d5.west);
+    \draw[darr] (s6.east) -- (d6.west);
+
+    % ---- 反馈箭头（优化迭代回代理模型）----
+    \draw[arr, dashed]
+      (s5.west) to[out=180, in=180] node[left, font=\scriptsize] {迭代评估} (s4.west);
+  \end{tikzpicture}
+  \caption{中期阶段确定的整体技术路线}
+  \label{fig:whole_structure}
+\end{figure}
+
+\subsection{当前进展}
+
+\begin{table}[H]
+  \centering
+  \caption{各模块当前进展}
+  \label{tab:module_progress}
+  \begin{tabularx}{\textwidth}{p{3.2cm} p{2cm} X}
+    \toprule
+    模块 & 状态 & 主要完成内容 \\
+    \midrule
+    B-Spline 参数化建模
+      & 完成
+      & 8 维控制点参数化；基准桨 APC 10$\times$7 几何重建误差 $<$1\% \\
+    QBlade/LLFVW 气动仿真
+      & 进行中
+      & 自动化仿真流程确定；截至 2026 年 6 月 28 日已汇总可训练样本 21296 条、508 个唯一几何；工作站继续生成剩余几何 \\
+    代理模型训练
+      & 进行中
+      & 已确定 MoE + LIFT-NLL 为主代理模型；基于当前合并数据的 32 组、1500 epoch 超参数扫描已在工作站启动 \\
+    前飞整体配平求解
+      & 完成
+      & 三方程非线性配平求解器完成；多初值策略，收敛率 $>$95\%；嵌入优化循环验证 \\
+    CMA-ES 优化搜索
+      & 进行中
+      & 框架搭建完成；内部链路验证确认目标函数按 $P_\text{elec}/V$ 下降；正式结果待当前可达数据模型扫参完成后更新 \\
+    Star-CCM+ 高保真验证
+      & 进行中
+      & 几何导入脚本与滑移网格模板完成；待优化结果确定后执行雷诺平均 Navier-Stokes（Reynolds-Averaged Navier-Stokes, RANS）验证 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+
+
+
+\section{目前已完成的研究工作及结果}
+
+\subsection{B-Spline 螺旋桨参数化建模}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.78\textwidth]{APC_10_7_geometry_BSpline.png}
+  \caption{APC 10$\times$7 B-Spline 几何参数化拟合结果}
+  \label{fig:bspline_fit}
+\end{figure}
+
+以 APC 10$\times$7 为对象，在 $r/R \in [0.15, 1.0]$ 全段对弦长与扭转进行 B-Spline 拟合，如图~\ref{fig:bspline_fit} 所示，误差均 $< 1\%$。
+
+为实现对螺旋桨三维几何外形的可控生成与灵活优化，采用 B-Spline 曲线对桨叶弦长分布 $c(r)$ 和扭转分布 $\theta(r)$ 分别进行参数化建模。B-Spline 曲线一般形式为
+\begin{equation}
+\mathbf{C}(u) = \sum_{i=0}^{n} N_{i,p}(u)\,\mathbf{P}_i,
+\end{equation}
+其中 $\mathbf{C}(u)$ 为曲线上参数 $u$ 对应的空间点，$n+1$ 为控制点总数，$\mathbf{P}_i$ 为第 $i$ 个控制点，$p$ 为 B-Spline 阶数，$u$ 在节点向量 $\{u_0, u_1, \dots, u_{n+p+1}\}$ 定义的参数域内取值。基函数 $N_{i,p}(u)$ 由 Cox-de Boor 递推公式定义：
+\begin{equation}
+N_{i,p}(u) = \frac{u - u_i}{u_{i+p} - u_i} N_{i,p-1}(u) + \frac{u_{i+p+1} - u}{u_{i+p+1} - u_{i+1}} N_{i+1,p-1}(u),
+\end{equation}
+\begin{equation}
+N_{i,0}(u) = \begin{cases} 1, & u_i \leq u < u_{i+1} \\ 0, & \text{otherwise} \end{cases}
+\end{equation}
+其中 $u_i$ 为节点向量中的第 $i$ 个节点值，$N_{i,0}(u)$ 为零阶（分片常数）基函数，高阶基函数由低阶递推得到。取 $p = 3$（三次）保证曲线二阶连续，且相比贝塞尔曲线具有更强的局部可控性——单个控制点的移动仅影响局部区域。各用 4 个控制点（chord $\times$ 4 + twist $\times$ 4）共 8 维设计变量，通过 22 个径向截面站位插值展开为完整的几何分布。设计变量上下界由拉丁超立方采样（Latin Hypercube Sampling, LHS）统计得出，并外扩 5\% 作为安全边距。
+
+\subsection{气动仿真数据生成（LLFVW）}
+
+\subsubsection{LLFVW 理论模型}
+
+传统的叶素动量理论（Blade Element Momentum Theory, BEMT）与升力线理论（Lifting Line Theory, LLT）在处理非定常来流、螺旋尾迹演化等复杂工况时存在精度瓶颈。升力线自由涡尾迹法（Lifting Line Free Vortex Wake, LLFVW）通过在桨叶四分之一弦线布置升力线，显式模拟自由尾迹的三维对流过程，结合 Biot-Savart 方程计算任意空间点的诱导速度，能够准确捕捉桨尖螺旋涡的卷起、衰减与桨叶—尾迹自感应。
+
+将叶片离散为 $N$ 个面板，每个面板上假设存在未知涡强度 $\Gamma_i$。依据 Biot-Savart 定律，涡线元在空间任一点产生的诱导速度微元为
+\begin{equation}
+\mathrm{d}\mathbf{V} = \frac{\Gamma}{4\pi}\,\frac{\mathrm{d}\mathbf{l} \times (\mathbf{r} - \mathbf{r}')}{\|\mathbf{r} - \mathbf{r}'\|^3},
+\end{equation}
+其中 $\Gamma$ 为涡强，$\mathrm{d}\mathbf{l}$ 为涡线元方向向量，$\mathbf{r}$ 为场点位置，$\mathbf{r}'$ 为涡元位置。
+
+第 $j$ 个控制点处所有面板涡元对法向速度的贡献可写为 $v_n^{(j)} = \sum_{i=1}^{N} a_{ij} \Gamma_i$，其中 $a_{ij}$ 为影响系数矩阵元素，由 Biot-Savart 积分在各面板中心解析计算得到。施加无穿透边界条件（固体表面法向速度为零）：
+\begin{equation}
+\left(\mathbf{V}_\infty + \sum_{i=1}^{N} a_{ij} \Gamma_i\,\hat{\mathbf{e}}_i\right)\cdot \mathbf{n}_j = 0, \quad j = 1,2,\dots,N,
+\end{equation}
+其中 $\mathbf{V}_\infty$ 为来流速度，$\hat{\mathbf{e}}_i$ 为第 $i$ 个面板涡元的方向单位向量，$\mathbf{n}_j$ 为第 $j$ 个面板的外法向量。由此得到 $N \times N$ 线性方程组：
+\begin{equation}
+\mathbf{A}\,\boldsymbol{\Gamma} = \mathbf{b}, \quad
+\mathbf{A} = [a_{ij}], \quad
+\boldsymbol{\Gamma} = [\Gamma_1, \dots, \Gamma_N]^{\top}, \quad
+\mathbf{b} = -[\mathbf{V}_\infty \cdot \mathbf{n}_1, \dots, \mathbf{V}_\infty \cdot \mathbf{n}_N]^{\top}.
+\end{equation}
+求解涡强 $\boldsymbol{\Gamma}$ 后，由 Kutta-Joukowski 定理得到各截面局部升力：
+\begin{equation}
+L' = \rho\,U_\infty\,\Gamma,
+\end{equation}
+其中 $\rho$ 为空气密度，$U_\infty$ 为当地合速度。
+
+LLFVW 与 LLT 的核心区别在于：尾涡线作为可自由对流的拉格朗日涡元，其位置随诱导速度场显式演化，而非按预设螺旋面固定。设第 $k$ 个尾涡 marker 在时刻 $t$ 的空间位置为 $\mathbf{x}_k(t)$，则其对流方程为
+\begin{equation}
+\frac{\mathrm{d}\mathbf{x}_k}{\mathrm{d}t} = \mathbf{V}_\infty + \sum_{j} \mathbf{V}_{\text{ind}}^{(j)}\!\bigl(\mathbf{x}_k\bigr),
+\end{equation}
+其中 $\mathbf{V}_{\text{ind}}^{(j)}(\mathbf{x}_k)$ 是由所有附着涡与已脱落尾涡在点 $\mathbf{x}_k$ 处产生的 Biot-Savart 诱导速度之和。
+
+时间步推进采用显式方案：在每一步 $\Delta t$ 内，先求解当前涡强 $\Gamma_i^n$，再推进所有尾涡 marker 至 $t^{n+1}$，并在桨叶后缘脱落新的尾涡环（满足 Kelvin 定理：附着环量变化量等于脱落涡环量的负值）。螺旋桨气动性能以推力系数 $C_T$、功率系数 $C_P$ 和推进效率 $\eta$ 评价：
+\begin{equation}
+C_T = \frac{T}{\rho n^2 d^4}, \qquad C_P = \frac{P}{\rho n^3 d^5}, \qquad \eta = J\,\frac{C_T}{C_P},
+\end{equation}
+其中 $T$ 为推力（N），$P$ 为功率（W），$n$ 为转速（rps），$d$ 为螺旋桨直径（m），$J = U_\infty/(nd)$ 为前进比。在悬停工况下（$J=0$），推进效率 $\eta$ 退化为零，此时采用品质因数（Figure of Merit, FM）评价悬停气动效率：
+\begin{equation}
+FM = \frac{T^{3/2}}{\sqrt{2\rho A}\,P_\text{shaft}},
+\label{eq:fm}
+\end{equation}
+其中 $\rho$ 为空气密度，$A = \pi R^2$ 为桨盘面积，$P_\text{shaft}$ 为轴功率。理想悬停旋翼的理论最低功率为 $P_\text{ideal} = T^{3/2}/\sqrt{2\rho A}$，故 $FM$ 的物理上限为 1，实际桨叶因叶尖涡损失和非均匀载荷通常 $FM < 0.8$。$FM$ 是第一版 DNN 代理模型的方法学验证指标（见~\ref{sec:dnn_limit}），亦是后续判断优化解是否落在物理可信区间的重要参考。
+
+\subsubsection{精度验证}
+
+精度验证采用由局部到整体的两级递进方式。
+
+翼型级（2D）：基于 QBlade 内置 XFoil 模块，选取 E374 与 NACA6409 翼型，在 $Re = 10^5 \sim 3 \times 10^5$ 条件下计算升阻系数 $C_l(\alpha)$、$C_d(\alpha)$。通过对比不同离散点数（100 至 291 个点），确定 251 个点为标准网格配置，在小攻角区域（$\alpha < 10^\circ$）数值结果与 UIUC 风洞数据库高度吻合。
+
+螺旋桨级（3D）：以 APC 10$\times$7 为对象，在 RPM $\in [4007, 6519]$、$J \in [0, 0.65]$ 共 140 组工况下开展 LLFVW 仿真，并与 UIUC 实验数据对比。当时间步取 3$^\circ$/步、共 1000 步时，$C_T$ 与 $C_P$ 曲线已收敛，且与实验数据误差均 $\leq 10\%$，验证了 LLFVW 在低雷诺数前飞工况下的工程可用性。LLFVW 计算效率显著高于计算流体力学（Computational Fluid Dynamics, CFD），适用于代理建模所需的大规模批量样本生成，但忽略黏性与分离效应，需结合高保真 CFD 进行终验校核。
+
+\subsubsection{自动化仿真数据生成框架}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance = 5mm and 8mm,
+  box/.style  = {rectangle, rounded corners=3pt, draw, fill=white,
+                 text width=3.6cm, minimum height=8mm, align=center, font=\small},
+  side/.style = {rectangle, rounded corners=2pt, draw=gray, fill=gray!8,
+                 text width=4.2cm, minimum height=8mm, align=left, font=\footnotesize},
+  arr/.style  = {-Stealth, thick},
+  darr/.style = {-Stealth, thick, gray},
+  loop/.style = {-Stealth, thick, dashed, blue!60},
+]
+  % 主流程节点
+  \node[box, fill=blue!8]    (s1) {B-Spline 控制点输入};
+  \node[box, below=of s1]    (s2) {自动生成桨叶几何};
+  \node[box, below=of s2]    (s3) {批量生成工况配置};
+  \node[box, fill=green!10, below=of s3] (s4) {GPU 加速 LLFVW 仿真};
+  \node[box, below=of s4]    (s5) {气动量采集与后处理};
+  \node[box, fill=orange!10, below=of s5] (s6) {逐几何即时落盘};
+
+  % 右侧说明
+  \node[side, right=of s1] (d1) {8 维控制点（弦长 $\times$4 + 扭角 $\times$4）};
+  \node[side, right=of s2] (d2) {degree=3 B-Spline 插值 $\to$ 22 截面 $(c,\theta)$};
+  \node[side, right=of s3] (d3) {6 RPM $\times$ 7 迎角 $=$ 42 个工况文件};
+  \node[side, right=of s4] (d4) {OpenCL GPU；实例跨工况复用；\\1000 步推进，取末 120 步均值};
+  \node[side, right=of s5] (d5) {输出：$T,\,H,\,M_y,\,Q$；\\符号翻转对齐无人机坐标系};
+  \node[side, right=of s6] (d6) {42 工况完成后写入 pkl；\\清零内存，切换下一几何};
+
+  % 主箭头
+  \draw[arr] (s1) -- (s2);
+  \draw[arr] (s2) -- (s3);
+  \draw[arr] (s3) -- (s4);
+  \draw[arr] (s4) -- (s5);
+  \draw[arr] (s5) -- (s6);
+
+  % 说明连线
+  \draw[darr] (s1.east) -- (d1.west);
+  \draw[darr] (s2.east) -- (d2.west);
+  \draw[darr] (s3.east) -- (d3.west);
+  \draw[darr] (s4.east) -- (d4.west);
+  \draw[darr] (s5.east) -- (d5.west);
+  \draw[darr] (s6.east) -- (d6.west);
+
+  % 循环箭头：落盘后切换下一几何（左侧绕回）
+  \draw[loop]
+    (s6.west) to[out=180, in=180] node[left, font=\scriptsize] {下一几何} (s1.west);
+\end{tikzpicture}
+\caption{自动化仿真数据生成框架流程}
+\label{fig:sim_pipeline}
+\end{figure}
+
+自动化框架的完整逻辑如图~\ref{fig:sim_pipeline} 所示。代理模型输入/输出格式为：
+\begin{equation}
+\begin{aligned}
+\mathbf{X} &=
+[\Omega,\, V,\, \alpha_{\mathrm{QBlade}},\, c_{\mathrm{cp},1},\dots,c_{\mathrm{cp},4},\,
+\theta_{\mathrm{cp},1},\dots,\theta_{\mathrm{cp},4}]^{\top} \in \mathbb{R}^{11},\\
+\mathbf{y} &= [T,\, H,\, M_y,\, Q]^{\top} \in \mathbb{R}^{4},
+\end{aligned}
+\end{equation}
+其中 $\Omega$ 为桨叶转速（RPM），$V$ 为来流速度（m/s），$\alpha_{\mathrm{QBlade}} = 90^\circ - \alpha$ 为 QBlade 坐标系下的来流角（$\alpha$ 为机体迎角），$c_{\mathrm{cp},j}$ 和 $\theta_{\mathrm{cp},j}$ 分别为第 $j$ 个 B-Spline 控制点的弦长（m）与扭角（°）；输出 $T$ 为推力（N），$H$ 为法向力（N），$M_y$ 为俯仰矩（N$\cdot$m），$Q$ 为旋转扭矩（N$\cdot$m）。
+
+\subsection{代理模型训练（MoE + 不确定性输出）}
+
+\subsubsection{深度神经网络的局限与不确定性输出的引入}
+\label{sec:dnn_limit}
+
+第一版深度神经网络（Deep Neural Network, DNN）采用确定性 MLP（均方误差 Mean Squared Error, MSE 损失）进行训练，以悬停品质因数 $FM$（见式~\ref{eq:fm}，物理上限为 1）作为方法学验证指标，探索"代理模型 + CMA-ES"的可行性。实验表明，在分布内精度尚可（平均绝对百分比误差 Mean Absolute Percentage Error, MAPE $\approx 1\%$），但将 DNN 直接耦合 CMA-ES 优化时，最优解的 $FM = 1.004$ 超出物理上限，84\%（37/44）截面的控制点落在训练数据分布之外——揭示了确定性代理模型在分布外（Out-of-Distribution, OOD）区域无法区分可信与不可信预测、优化器持续向虚假极值收敛的根本缺陷。在此基础上将物理模型扩展至前飞工况，优化目标随之切换为单位航程能耗 $P_\text{elec}/V$，同时针对上述 OOD 缺陷引入不确定性输出。
+
+为此，将代理模型引入不确定性输出：模型对每个气动量同时输出预测均值 $\bm{\mu}$ 与不确定度 $\bm{\sigma}$。$\bm{\sigma}$ 在数据稠密的分布内区域保持较小，在数据稀疏或 OOD 区域趋于增大，为优化器提供可信度信号——高 $\bm{\sigma}$ 区域的候选解被惩罚或拒绝，使搜索自动回避不可信区域。
+
+\subsubsection{MoE + LIFT-NLL 架构}
+
+当前版本最终选定混合专家网络（Mixture of Experts, MoE）+ 异方差负对数似然（Lifted Heteroscedastic Negative Log-Likelihood, LIFT-NLL）架构，作为前飞整体配平与螺旋桨外形优化的代理模型。该选择并非单纯追求测试集误差最小，而是由后续优化任务反推得到：首先，输入空间同时包含转速、来流、迎角以及 8 个 B-Spline 几何控制量，输出又包括 $T$、$H$、$M_y$ 和 $Q$ 四个强耦合气动量，单一确定性 MLP 难以稳定表达不同工况/几何区域内的响应差异；其次，CMA-ES 会主动探索训练分布边界，如果模型只能给出点预测，优化器容易利用分布外虚假低功耗区域；最后，配平残差和航程目标均依赖推力、法向力、俯仰矩与扭矩的联合可信预测，因此模型需要同时给出均值精度和不确定度诊断。MoE 通过专家间分歧表达 epistemic 不确定度，LIFT-NLL 则将预测误差与方差幅值共同纳入损失，使模型在精度与可信度之间取得平衡。当前 508 几何上的阶段性扫参结果也验证了该架构在 $T$、$H$、$Q$ 等配平与功率主导量上具备足够高的预测精度，能够支撑后续正式优化链路。
+
+MoE 由共享编码器、门控网络和 $K$ 个并行专家组成，门控网络根据输入自适应地将样本软路由到各专家，各专家输出独立的均值与对数方差，最终按全方差公式混合：
+\begin{equation}
+\bm{\mu}_{\mathrm{mix}} = \sum_{k=1}^K \pi_k\,\bm{\mu}_k, \qquad
+\bm{\sigma}_{\mathrm{mix}}^2 = \underbrace{\sum_{k=1}^K \pi_k\,\bm{\sigma}_k^2}_{\text{aleatoric（数据固有噪声）}} + \underbrace{\sum_{k=1}^K \pi_k\,(\bm{\mu}_k - \bm{\mu}_{\mathrm{mix}})^2}_{\text{epistemic（专家间分歧）}},
+\label{eq:moe_mixture}
+\end{equation}
+其中 $K$ 为专家数量，也是超参数扫描的核心变量之一；$\pi_k$ 为门控网络输出的第 $k$ 个专家的路由权重（$\sum_{k=1}^K \pi_k = 1$），$\bm{\mu}_k \in \mathbb{R}^4$ 和 $\bm{\sigma}_k^2 \in \mathbb{R}^4$ 分别为第 $k$ 个专家对四维气动量 $[T, H, M_y, Q]$ 的预测均值和方差。第一项为各专家内在方差之加权和（aleatoric 不确定度），第二项为专家间均值分歧的加权和（epistemic 不确定度），专家预测分散时第二项显著增大，构成内在的 OOD 感知机制。MoE 网络架构如图~\ref{fig:moe_arch} 所示。
+
+\begin{figure}[H]
+  \centering
+  \begin{minipage}{0.96\textwidth}
+    \centering
+    \begin{tikzpicture}[
+      box/.style={rectangle, rounded corners=3pt, draw, align=center,
+                  minimum width=3.2cm, minimum height=8mm, font=\footnotesize},
+      arr/.style={-Stealth, thick}
+    ]
+      \node[box, fill=blue!8] (x) at (0,0) {$\mathbf{X}\in\mathbb{R}^{11}$\\3工况 + 8控制点};
+      \node[box, fill=green!10] (enc) at (0,-1.25) {共享编码器\\$\mathbf{h}=f_\phi(\mathbf{X})$};
+      \node[box, fill=yellow!15] (gate) at (-2.7,-2.75) {门控网络\\$\pi_k=\mathrm{softmax}(\mathbf{g})$};
+      \node[box, fill=orange!12] (exp) at (2.7,-2.75) {$K$ 个专家\\$\bm{\mu}_k,\bm{\sigma}_k^2$};
+      \node[box, fill=red!8] (mix) at (0,-4.1) {混合输出\\$\bm{\mu}_{\mathrm{mix}},\bm{\sigma}_{\mathrm{mix}}^2$};
+      \draw[arr] (x) -- (enc);
+      \draw[arr] (enc) -- (gate);
+      \draw[arr] (enc) -- (exp);
+      \draw[arr] (gate) -- (mix);
+      \draw[arr] (exp) -- (mix);
+    \end{tikzpicture}
+    \par\smallskip
+    {\footnotesize (a) MoE 代理模型前向结构}
+  \end{minipage}
+  \par\medskip
+  \begin{minipage}{0.96\textwidth}
+    \centering
+    \begin{tikzpicture}[
+      node distance=7mm,
+      box/.style={rectangle, rounded corners=3pt, draw, align=center,
+                  text width=9.2cm, minimum height=8mm, font=\footnotesize},
+      arr/.style={-Stealth, thick}
+    ]
+      \node[box, fill=gray!8] (var) {
+        $\bm{\sigma}_{\mathrm{mix}}^2 =
+        \sum_k\pi_k\bm{\sigma}_k^2
+        + \sum_k\pi_k(\bm{\mu}_k-\bm{\mu}_{\mathrm{mix}})^2$\\
+        前项：aleatoric；后项：epistemic};
+      \node[box, fill=gray!12, below=of var] (loss) {
+        $\mathcal{L}_{\mathrm{NLL}}
+        = \frac{(y-\mu)^2}{\sigma^2}+\log\sigma^2$\\
+        $+\lambda_b\mathcal{R}_{\mathrm{balance}}
+        -\lambda_s\mathcal{H}(\bm{\pi})$};
+      \node[box, fill=blue!6, below=of loss] (use) {
+        优化器使用 $\bm{\mu}$ 计算配平/功率，使用 $\bm{\sigma}$ 识别外推风险};
+      \draw[arr] (var) -- (loss);
+      \draw[arr] (loss) -- (use);
+    \end{tikzpicture}
+    \par\smallskip
+    {\footnotesize (b) 不确定度分解与 LIFT-NLL 损失}
+  \end{minipage}
+  \caption{MoE + LIFT-NLL 网络架构与损失机制。为避免单幅图中过多连线重叠，图中将模型前向结构和不确定度/损失机制分为两个子图表示。}
+  \label{fig:moe_arch}
+\end{figure}
+
+训练损失采用异方差 NLL（LIFT-NLL），附加负载均衡与熵正则项防止专家坍缩：
+\begin{equation}
+\mathcal{L} = \frac{1}{B}\sum_{i=1}^{B}\sum_{j=1}^{4}\left[\frac{(y_j^{(i)} - \mu_j^{(i)})^2}{\sigma_j^{(i)2}} + \log\sigma_j^{(i)2}\right]
++ \lambda_b\,\mathcal{R}_{\mathrm{balance}} - \lambda_s\,\mathcal{H}(\bm{\pi}),
+\end{equation}
+其中 $B$ 为批次大小，$i$ 为批内样本索引，$j \in \{T, H, M_y, Q\}$ 为气动量维度索引，$y_j^{(i)}$ 为真实值，$\mu_j^{(i)}$ 和 $\sigma_j^{(i)}$ 分别为模型对第 $i$ 个样本第 $j$ 维的预测均值和标准差。方括号内第一项在预测误差大时增大，第二项在 $\sigma$ 过大时增大，两项相互制约，迫使模型在精度与不确定度量级之间取得平衡。$\mathcal{R}_{\mathrm{balance}}$ 为负载均衡正则项（权重 $\lambda_b$），惩罚专家使用率不均；$\mathcal{H}(\bm{\pi}) = -\mathbb{E}[\sum_k \pi_k \log \pi_k]$ 为门控分布熵正则项（权重 $\lambda_s$），鼓励门控保持多元化，防止 Expert 坍缩。
+
+\subsubsection{模型选择、当前表现与正式扫参配置}
+
+确定性 MLP、MLP+LIFT-NLL 与 MoE+LIFT-NLL 均在当前 508 个几何数据上进行了统一训练预算下的可复现实验，其中各模型均训练 1500 epochs。需要强调的是，确定性 DNN 的均方误差下降较快，且在当前数据集上能够取得较好的点预测精度，但这并不等价于优化任务中更可靠：确定性 DNN 只输出预测均值，无法判断候选几何是否落在训练分布之外，也无法为 CMA-ES 搜索过程提供外推风险信号。相比之下，MLP+LIFT-NLL 在 1500 epochs 后不仅将点预测误差降至与 DNN 接近的水平（MAE 均约为 0.036），还能够输出异方差不确定度，误差--不确定度相关性约为 0.567，说明其不确定度已经能够在一定程度上反映预测误差大小。图~\ref{fig:current_model_training_curves} 与图~\ref{fig:current_model_metric_heatmap} 给出了当前数据下的训练曲线和综合指标。
+
+进一步地，MoE+LIFT-NLL 在 LIFT-NLL 的基础上引入专家分歧，将不确定度分解为 aleatoric 与 epistemic 两部分，因此比单一 MLP 更适合与 CMA-ES 这类主动探索边界区域的优化器耦合。当前 1500 epochs 训练结果显示，MoE+LIFT-NLL 仍保持最低的点预测误差（MAE 约为 0.029），同时具有较高的误差--不确定度相关性（约 0.575）。因此，本文最终采用 MoE+LIFT-NLL 作为前飞配平与桨叶外形优化的代理模型：DNN 作为确定性点预测基线，MLP+LIFT-NLL 作为单网络不确定性基线，MoE+LIFT-NLL 则作为兼顾预测精度与外推风险识别能力的最终模型。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{current_model_training_curves.png}
+  \caption{当前 508 个几何的模型训练曲线。DNN 使用验证集 MSE，MLP+LIFT-NLL 与 MoE+LIFT-NLL 使用验证集 NLL，因此图中仅对曲线做归一化以比较收敛趋势，不直接比较不同损失的绝对数值。}
+  \label{fig:current_model_training_curves}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.94\textwidth]{current_model_metric_heatmap.png}
+  \caption{当前 508 几何上的模型精度与不确定度对比热力图。MAE score 表示对 MAE 反向归一化后的得分，数值越高表示点误差越低；uncertainty error corr. 为样本平均绝对误差与预测不确定度之间的相关性，DNN 无不确定度输出，记为 N/A。}
+  \label{fig:current_model_metric_heatmap}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    node distance=8mm and 11mm,
+    box/.style={rectangle, rounded corners=3pt, draw, align=center,
+                minimum height=10mm, font=\small},
+    wide/.style={box, text width=3.6cm},
+    mid/.style={box, text width=3.0cm},
+    outputnode/.style={box, text width=3.3cm},
+    arr/.style={-Stealth, thick}
+  ]
+    \node[wide, fill=blue!8] (x47) {47 维全截面输入\\3 工况 + 22 弦长采样 + 22 扭角采样};
+    \node[mid, fill=gray!10, right=of x47] (d47) {高分辨率截面描述\\适合全截面代理};
+    \node[outputnode, fill=red!8, right=of d47, yshift=-13mm] (model) {MoE + LIFT-NLL\\输出 $T,H,M_y,Q$\\及不确定度};
+    \node[wide, fill=green!10, below=18mm of x47] (x11) {11 维控制点输入\\3 工况 + 4 弦长 CP + 4 扭转 CP};
+    \node[mid, fill=gray!10, right=of x11] (d11) {优化原生设计变量\\直接对应 B-Spline 控制点};
+    \draw[arr] (x47) -- (d47);
+    \draw[arr] (d47) -- (model);
+    \draw[arr] (x11) -- (d11);
+    \draw[arr] (d11) -- (model);
+    \node[font=\footnotesize, text=gray, below=4mm of x11, xshift=44mm]
+      {当前 508 几何用于模型训练；正式优化采用 11 维控制点输入以保持设计变量一致。};
+  \end{tikzpicture}
+  \caption{47 维全截面输入与 11 维控制点输入的关系。47 维形式用于保留完整径向截面信息，11 维形式直接对应 CMA-ES 搜索变量；本文优化主线采用后者。}
+  \label{fig:input_dimension_comparison}
+\end{figure}
+
+当前正式超参数扫描基于已归一化的 508 个几何、21296 条 LLFVW 样本进行，按照几何编号进行 90/10 分组划分，避免同一几何的不同工况同时出现在训练集和测试集中。扫描空间覆盖 $K \in \{2,4,6,8\}$、\texttt{hidden\_dim} $\in \{64,128,256\}$、\texttt{shared\_dim} $\in \{32,64,128\}$、学习率 $\in \{10^{-3},5\times10^{-4}\}$、权重衰减 $\in \{10^{-4},10^{-3}\}$、负载均衡权重 $\lambda_b \in \{0,0.01,0.1\}$ 以及熵正则权重 $\lambda_s \in \{0,0.01\}$；由于完整网格规模较大，本阶段随机抽取 32 组配置，各训练 1500 epoch。该正式扫描已在 3660 工作站启动，完成后将自动生成 \texttt{results.csv}、\texttt{sweep\_overview.png} 和 \texttt{best\_trial} 目录，作为论文最终模型参数、精度表、预测散点图与不确定度校准图的唯一来源。
+
+\begin{table}[H]
+  \centering
+  \caption{当前正式 MoE 扫参配置（508 几何合并数据）}
+  \label{tab:formal_sweep_config}
+  \begin{tabularx}{\textwidth}{llX}
+    \toprule
+    项目 & 当前设置 & 说明 \\
+    \midrule
+    训练数据 & 21296 条样本、508 个几何 & 3660 与 7920 的已生成数据提取为 CSV 后合并 \\
+    划分方式 & 按几何编号 90/10 划分 & 避免同一几何的不同工况同时出现在训练集与测试集 \\
+    模型结构 & MoE + LIFT-NLL & 输出均值与不确定度，支持 OOD 风险诊断 \\
+    扫参规模 & 32 组随机配置 $\times$ 1500 epoch & 从 864 个候选组合中随机抽样 \\
+    运行位置 & 3660 工作站 GPU & 输出 \texttt{results.csv}、\texttt{sweep\_overview.png}、\texttt{best\_trial} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+当前阶段性最优结果来自同一 508 几何、21296 条样本，训练/测试划分为按几何编号分组的 90/10 划分，因此可作为模型选择与配置合理性的当前证据，阶段性最优配置与测试集表现见表~\ref{tab:partial_sweep_best}。
+
+\begin{table}[H]
+  \centering
+  \caption{当前已完成正式 sweep 的阶段性最优模型表现}
+  \label{tab:partial_sweep_best}
+  \begin{tabularx}{\textwidth}{lX}
+    \toprule
+    项目 & 当前阶段性结果 \\
+    \midrule
+    当前数据 & 2026-06-28 14:25 合并 CSV，21296 条样本、508 个几何 \\
+    模型配置 & MoE + LIFT-NLL，$K=6$，\texttt{hidden\_dim}=128，\texttt{shared\_dim}=128 \\
+    训练超参数 & 学习率 $5\times10^{-4}$，权重衰减 $10^{-4}$，$\lambda_b=0$，$\lambda_s=0.01$ \\
+    最优 epoch & 1496 / 1500 \\
+    测试集 LIFT-NLL & $-6.5960$ \\
+    测试集 MAE & $0.0316$（归一化空间） \\
+    $R^2(T,H,M_y,Q)$ & $(0.9999,\;0.9988,\;0.9877,\;0.9999)$ \\
+    当前用途 & 支撑当前模型选择与优化链路检查；最终结果等待 32 组 sweep 全部完成后的 \texttt{best\_trial} \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.90\textwidth]{current_moe_sweep_dotplot.png}
+  \caption{当前已完成 MoE sweep 结果的点图。每个点对应一组 1500 epochs 训练完成的超参数配置，横轴为 $-\mathrm{NLL}$（越大表示验证集 NLL 越低），点颜色同样表示 $-\mathrm{NLL}$，点大小表示测试集 MAE 的相对优劣（点越大表示 MAE 越低）；左侧标注给出 trial 编号及主要结构参数。}
+  \label{fig:current_moe_sweep_dotplot}
+\end{figure}
+
+从当前已完成配置看，MoE+LIFT-NLL 在推力 $T$、法向力 $H$ 和扭矩 $Q$ 上的 $R^2$ 均接近 1，俯仰矩 $M_y$ 的 $R^2$ 约为 0.9877，说明模型已能较好捕捉配平方程中的主要力/矩响应。由于前飞配平对 $T$、$H$、$M_y$ 的平衡关系敏感，而航程目标直接依赖 $Q$ 推算电功率，该表现说明当前模型具备进入配平与航程优化测试的基础。后续待 32 组配置全部完成后，将以完整 \texttt{results.csv} 中的最优 \texttt{best\_trial} 替换本表，并生成最终预测散点图、不确定度诊断图和航程优化图。
+
+\subsection{前飞整体配平求解}
+
+本研究以 RotorS Iris 四旋翼作为整机基准，其质量、转动惯量、机臂长度和旋翼安装位置依据开源 RotorS 模型设置；螺旋桨选用 APC 10$\times$7E，气动性能和几何信息参考公开螺旋桨数据库与 APC 官方几何文件。由于公开资料中缺少与 APC 10$\times$7E 完全匹配的四旋翼机身气动数据库，本文采用基于投影面积分解的半经验外壳阻力模型，在配平方程中保留机身阻力项 $D_f$。旋翼气动力以 $[T,\,H,\,M_y,\,Q]$ 四输出形式由代理模型提供，结合四旋翼前飞纵向配平方程联合求解机身迎角 $\alpha$、前桨转速 $\Omega_\text{front}$ 和后桨转速 $\Omega_\text{rear}$，最终以给定巡航速度 $V$ 下单位距离电功率消耗 $P_\text{elec}/V$ 最小为优化目标，开展桨叶外形优化。
+
+\subsubsection{配平方程组}
+
+图~\ref{fig:trim_force_diagram} 给出了本文配平方程采用的纵向受力/力矩关系。本文将四旋翼前飞问题简化为纵向平面内的前后两组旋翼等效模型，每组包含左右两个旋翼，因此配平方程中旋翼力和力矩项前均乘以系数 2。下标 $1$ 表示前桨组，$2$ 表示后桨组；下标 $p$ 表示 propeller（旋翼），下标 $f$ 表示 fuselage（机身）。
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[
+    scale=0.95,
+    arr/.style={-Stealth, thick},
+    dim/.style={|-|, thin, gray},
+    lab/.style={font=\footnotesize},
+    body/.style={draw=black!65, line width=1pt, fill=gray!10}
+  ]
+    % coordinates
+    \coordinate (cg) at (0,0);
+    \coordinate (front) at (-3.1,0.85);
+    \coordinate (rear) at (3.1,-0.45);
+
+    % reference lines
+    \draw[green!55!black, dashed] (-4.5,0) -- (4.9,0) node[right, lab] {水平面};
+    \draw[orange!70!black, dashed] (-4.2,1.05) -- (4.3,-0.72) node[right, lab] {机体/机头方向};
+    \draw[body, rotate around={-12:(cg)}] (-3.7,-0.25) rectangle (3.7,0.25);
+    \fill[black] (cg) circle (2pt) node[above right, lab, red] {CG};
+
+    % rotors
+    \draw[black!60, line width=1.1pt] ($(front)+(-0.45,0.05)$) -- ($(front)+(0.45,-0.05)$);
+    \draw[black!60, line width=1.1pt] ($(rear)+(-0.45,0.05)$) -- ($(rear)+(0.45,-0.05)$);
+
+    % velocity and angles
+    \draw[arr, purple] (cg) -- (1.55,0.08) node[right, lab] {$V$};
+    \draw[thin] (0.75,0) arc[start angle=0,end angle=-12,radius=0.75];
+    \node[lab] at (0.95,-0.17) {$\alpha$};
+    \draw[thin] (-0.65,0) arc[start angle=180,end angle=168,radius=0.65];
+    \node[lab] at (-0.85,0.16) {$\vartheta$};
+
+    % forces
+    \draw[arr, blue] (front) -- ++(0.35,1.15) node[above, lab] {$T_{p1}$};
+    \draw[arr, blue] (rear) -- ++(0.35,1.15) node[above, lab] {$T_{p2}$};
+    \draw[arr, orange!85!black] (front) -- ++(-0.95,0.27) node[left, lab] {$H_{p1}$};
+    \draw[arr, orange!85!black] (rear) -- ++(-0.95,0.27) node[left, lab] {$H_{p2}$};
+    \draw[arr, red!80!black] (cg) -- ++(-1.35,-0.12) node[left, lab] {$D_f$};
+    \draw[arr, teal!70!black] (cg) -- ++(0,-1.10) node[below, lab] {$L_f$};
+    \draw[arr, green!55!black] (cg) -- ++(0,-1.75) node[below, lab] {$mg$};
+
+    % moments
+    \draw[arr, blue!65!black] ($(front)+(0.25,-0.05)$) arc[start angle=-40,end angle=250,radius=0.25];
+    \node[lab] at ($(front)+(0.55,-0.20)$) {$M_{p1}^{y}$};
+    \draw[arr, blue!65!black] ($(rear)+(0.25,-0.05)$) arc[start angle=-40,end angle=250,radius=0.25];
+    \node[lab] at ($(rear)+(0.55,-0.20)$) {$M_{p2}^{y}$};
+    \draw[arr, cyan!60!black] (0.18,-0.10) arc[start angle=-60,end angle=220,radius=0.33];
+    \node[lab] at (0.56,-0.42) {$M_f^{y}$};
+
+    % dimensions
+    \draw[dim] (front |- 0,1.45) -- (cg |- 0,1.45) node[midway, above, lab] {$l_1$};
+    \draw[dim] (cg |- 0,-1.25) -- (rear |- 0,-1.25) node[midway, below, lab] {$l_2$};
+    \draw[dim] ($(front)+(0.70,0)$) -- ($(front)+(0.70,-0.85)$) node[midway, right, lab] {$d_1$};
+    \draw[dim] ($(rear)+(0.70,0)$) -- ($(rear)+(0.70,0.45)$) node[midway, right, lab] {$d_2$};
+  \end{tikzpicture}
+  \caption{四旋翼前飞纵向配平受力示意。$T_{pi}$、$H_{pi}$、$M_{pi}^{y}$ 分别为第 $i$ 组旋翼的推力、法向力与俯仰力矩；$D_f$、$L_f$、$M_f^{y}$ 为机身气动阻力、升力和俯仰力矩；$l_i$ 为旋翼到质心的纵向力臂，$d_i$ 为旋翼相对质心的垂向力臂。}
+  \label{fig:trim_force_diagram}
+\end{figure}
+
+前飞配平要求同时满足三轴平衡，展开为如下方程组：
+\begin{align}
+F_x &= 2(T_1 + T_2)\sin\alpha - 2(H_1 + H_2)\cos\alpha - D_f = 0, \\
+F_z &= 2(T_1 + T_2)\cos\alpha + 2(H_1 + H_2)\sin\alpha - mg - L_f = 0, \\
+M_y &= 2M_1^y + 2M_2^y - M_f^y + 2(T_2 l_2 - T_1 l_1) + 2(H_1 d_1 + H_2 d_2) = 0,
+\end{align}
+其中 $T_i$、$H_i$、$M_i^y$ 分别为第 $i$ 副桨的推力、法向力与俯仰矩，由代理模型预测给出；$D_f$、$L_f$、$M_f^y$ 为机身气动阻力、升力与俯仰矩；$l_i$ 为前/后桨到重心的纵向力臂，$d_i$ 为桨毂高于重心的垂直距离。三个未知量为 $\mathbf{x} = [\alpha,\, \Omega_\text{front},\, \Omega_\text{rear}]^\top$，约束范围 $\text{RPM} \in [4000, 6500]$。在真实 LLFVW 数据接入后，QBlade 输出的 $T$、$Q$ 与配平方程采用不同符号约定，进入配平器前统一转换为物理正推力与正扭矩；$H$ 也按机体系正方向进行符号适配。可行性测试表明，若保持 $\alpha \in [2^\circ,8^\circ]$，当前 10 m/s 巡航解贴近下边界而难以严格收敛；因此本阶段测试将下界放宽为 $\alpha \in [1^\circ,8^\circ]$，后续随数据补齐再重新确定工程约束。
+
+\subsubsection{飞行器参数与机身气动模型}
+
+配平方程所用飞行器参数基于 RotorS Iris 四旋翼标准参数，汇总于表~\ref{tab:uav_params}。
+
+\begin{table}[H]
+  \centering
+  \caption{配平求解器飞行器参数（RotorS Iris）}
+  \label{tab:uav_params}
+  \begin{tabular}{llcll}
+    \toprule
+    参数 & 符号 & 数值 & 单位 & 来源/说明 \\
+    \midrule
+    \multicolumn{5}{l}{\textit{质量参数}} \\
+    机体质量              & $m$            & 1.5       & kg       & RotorS Iris 主体质量 \\
+    单个旋翼连杆质量        & $m_r$          & 0.005     & kg       & RotorS Iris \\
+    配平等效质量           & $m_\text{trim}$& 1.5       & kg       & 采用主体质量 \\
+    重力加速度             & $g$            & 9.81      & m/s$^2$  & 标准值 \\
+    \midrule
+    \multicolumn{5}{l}{\textit{转动惯量}} \\
+    滚转惯量               & $J_{xx}$       & 0.0347563 & kg$\cdot$m$^2$ & RotorS Iris \\
+    俯仰惯量               & $J_{yy}$       & 0.0458929 & kg$\cdot$m$^2$ & RotorS Iris \\
+    偏航惯量               & $J_{zz}$       & 0.0977    & kg$\cdot$m$^2$ & RotorS Iris \\
+    惯量积                 & $J_{xy},J_{xz},J_{yz}$ & 0 & kg$\cdot$m$^2$ & 对称构型取零 \\
+    \midrule
+    \multicolumn{5}{l}{\textit{几何参数}} \\
+    前桨纵向力臂            & $l_1$          & 0.13      & m        & 前旋翼到质心 x 向距离 \\
+    后桨纵向力臂            & $l_2$          & 0.13      & m        & 后旋翼到质心 x 向距离 \\
+    前桨垂向力臂            & $d_1$          & 0.023     & m        & 桨盘相对机体中心高度 \\
+    后桨垂向力臂            & $d_2$          & 0.023     & m        & 桨盘相对机体中心高度 \\
+    前桨侧向位置            & $y_f$          & 0.22      & m        & 用于完整六自由度模型 \\
+    后桨侧向位置            & $y_r$          & 0.20      & m        & 用于完整六自由度模型 \\
+    机体等效宽度            & $b$            & 0.47      & m        & 正面等效尺寸 \\
+    机体等效高度            & $h$            & 0.11      & m        & 顶面等效尺寸 \\
+    \midrule
+    \multicolumn{5}{l}{\textit{气动与环境参数}} \\
+    空气密度               & $\rho$         & 1.225     & kg/m$^3$ & 标准海平面 \\
+    正面阻力系数            & $C_{D,\text{front}}$ & 1.10 & —      & 等效钝体模型 \\
+    顶面阻力系数            & $C_{D,\text{top}}$   & 1.20 & —      & 等效钝体模型 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+机身气动力采用等效钝体阻力模型。正面投影面积 $A_\text{front} = b \times h = 0.47 \times 0.11 = 0.0517\ \text{m}^2$，顶面投影面积 $A_\text{top} = b^2 = 0.47^2 = 0.2209\ \text{m}^2$，对应阻力系数分别取 $C_{D,\text{front}} = 1.10$、$C_{D,\text{top}} = 1.20$。机身阻力 $D_f$ 由经典阻力方程合成：
+\begin{equation}
+D_f(V,\alpha) = \tfrac{1}{2}\rho V^2 \bigl(C_{D,\text{front}}\,A_\text{front}\cos^2\!\alpha + C_{D,\text{top}}\,A_\text{top}\sin^2\!\alpha\bigr),
+\end{equation}
+其中 $V$ 为来流速度，$\alpha$ 为机体迎角。该式将迎风面阻力与顶面阻力按迎角加权叠加，$\cos^2\alpha$ 项主导水平飞行（$\alpha \to 0$），$\sin^2\alpha$ 项主导爬升（$\alpha \to 90^\circ$）。
+
+\subsubsection{功率模型}
+
+配平收敛后，前后桨气动功率由扭矩与角速度的乘积求和得到：
+\begin{equation}
+P_\text{aero} = 2Q_1\Omega_1 + 2Q_2\Omega_2,
+\end{equation}
+其中 $Q_i$ 为第 $i$ 副桨扭矩（N$\cdot$m），$\Omega_i$ 为对应角速度（rad/s），系数 2 反映前/后各有两个共轴旋翼。考虑电机与电调综合效率 $\eta_\text{elec} = \eta_m \cdot \eta_\text{esc} = 0.80$，电功率为
+\begin{equation}
+P_\text{elec} = \frac{P_\text{aero}}{\eta_\text{elec}} = \frac{2Q_1\Omega_1 + 2Q_2\Omega_2}{0.80}.
+\end{equation}
+优化目标为最小化单位巡航距离电功率消耗：
+\begin{equation}
+\min_{\mathbf{x}_g \in \mathbb{R}^8} \;\; f = \frac{P_\text{elec}}{V},
+\end{equation}
+其中 $\mathbf{x}_g$ 为 8 维 B-Spline 控制点设计变量，$V$ 为巡航速度（m/s）。该指标与 Breguet 航程方程中的功率—速度比直接对应，数值越小代表单位距离能耗越低、续航越强。
+
+\subsubsection{Powell Hybrid 求解方法}
+
+配平方程组构成非线性方程组 $\mathbf{F}(\mathbf{x}) = \mathbf{0}$，采用 Powell Hybrid 方法（scipy \texttt{hybr}）求解。该方法以标准牛顿步为出发点，在信赖域约束下求解以下子问题：
+\begin{equation}
+\mathbf{p}^{(k)} = \arg\min_{\|\mathbf{p}\| \leq \Delta^{(k)}} \left\| \mathbf{F}^{(k)} + \mathbf{J}^{(k)}\mathbf{p} \right\|_2^2,
+\end{equation}
+等价于求解带 Levenberg-Marquardt 参数 $\lambda^{(k)}$ 的线性方程组：
+\begin{equation}
+\bigl(\mathbf{J}^{(k)\top}\mathbf{J}^{(k)} + \lambda^{(k)}\mathbf{I}\bigr)\mathbf{p}^{(k)} = -\mathbf{J}^{(k)\top}\mathbf{F}^{(k)},
+\end{equation}
+其中 $\lambda^{(k)} = 0$ 时退化为标准牛顿步，$\lambda^{(k)} > 0$ 时步长被压缩至信赖域边界。实际步向量由牛顿步与最速下降步的 dogleg 折线构成：
+\begin{equation}
+\mathbf{p}^{(k)} =
+\begin{cases}
+\mathbf{p}^N, & \|\mathbf{p}^N\| \leq \Delta^{(k)}, \\[4pt]
+\tau\,\mathbf{p}^{SD} + (1-\tau)\,\mathbf{p}^N, & \|\mathbf{p}^{SD}\| \leq \Delta^{(k)} < \|\mathbf{p}^N\|,
+\end{cases}
+\end{equation}
+其中最速下降步 $\mathbf{p}^{SD} = -\dfrac{\|\mathbf{J}^{(k)\top}\mathbf{F}^{(k)}\|^2}{\|\mathbf{J}^{(k)}\mathbf{J}^{(k)\top}\mathbf{F}^{(k)}\|^2}\,\mathbf{J}^{(k)\top}\mathbf{F}^{(k)}$，$\tau \in [0,1]$ 由 $\|\mathbf{p}\| = \Delta^{(k)}$ 确定。
+
+雅可比矩阵在每步由 Broyden 秩1公式廉价更新，仅在实际下降与预测下降之比
+\begin{equation}
+\rho^{(k)} = \frac{\|\mathbf{F}^{(k)}\|^2 - \|\mathbf{F}^{(k+1)}\|^2}{\|\mathbf{F}^{(k)}\|^2 - \|\mathbf{F}^{(k)} + \mathbf{J}^{(k)}\mathbf{p}^{(k)}\|^2}
+\end{equation}
+低于阈值时触发完整有限差分重算；信赖域半径 $\Delta^{(k+1)}$ 依据 $\rho^{(k)}$ 自适应放大或收缩。收敛准则为 $\|\mathbf{F}(\mathbf{x}^*)\|_\infty < 10^{-3}$。
+
+\subsubsection{多初值策略与热启动}
+
+由于方程组高度非线性，采用 6 组初始猜测，依次以不同迎角（$\alpha \in \{3^\circ, 5^\circ, 7^\circ, 8^\circ\}$）和转速比例因子（$\times 0.75$、$\times 1.25$）覆盖可行域，返回首个满足约束的收敛解。对相邻速度点，将上一工况的配平解作为初始猜测（热启动），可将求解代价降低约 60\%。多初值策略下整体收敛率 $>95\%$；配平失败时赋惩罚值 $J = 10^6$，使优化器自动回避不可配平区域。配平后电功率
+\begin{equation}
+P_\text{elec} = \frac{2\bigl(|Q_1|\,\omega_1 + |Q_2|\,\omega_2\bigr)}{\eta}
+\end{equation}
+直接作为优化目标，其中 $\eta$ 为电机与电调综合效率。
+
+\subsection{CMA-ES 优化搜索（方法验证阶段）}
+
+确认 OOD 虚假最优根因后，优化路线由近端策略优化（PPO）+ 遗传算法（NSGA-II）调整为协方差矩阵自适应进化策略（Covariance Matrix Adaptation Evolution Strategy, CMA-ES）加数据驱动约束。优化目标为最小化单位巡航距离电功率消耗：
+\begin{equation}
+\min_{\mathbf{x} \in \mathbb{R}^8} \;\; f(\mathbf{x}) = \frac{P_{\text{elec}}(\mathbf{x},\,V)}{V},
+\end{equation}
+其中 $\mathbf{x} \in \mathbb{R}^8$ 为 B-Spline 控制点设计变量，$P_\text{elec}$ 通过代理模型前向推理与配平求解联合计算得到。
+
+\subsubsection{CMA-ES 算法原理}
+
+CMA-ES 在 $n=8$ 维参数空间中维护一个多变量正态分布 $\mathcal{N}(\mathbf{m}^{(g)},\,\sigma^{(g)2}\mathbf{C}^{(g)})$ 作为搜索分布，其中 $\mathbf{m}^{(g)} \in \mathbb{R}^8$ 为第 $g$ 代均值（当前最优估计），$\sigma^{(g)} \in \mathbb{R}^+$ 为全局步长，$\mathbf{C}^{(g)} \in \mathbb{R}^{8\times8}$ 为协方差矩阵（描述各维度相关性与各向异性）。每代算法分四步执行：
+
+\paragraph{步骤一：采样}
+从当前分布中采样 $\lambda$ 个子代候选解：
+\begin{equation}
+\mathbf{x}_k^{(g+1)} = \mathbf{m}^{(g)} + \sigma^{(g)}\,\mathbf{B}^{(g)}\mathbf{D}^{(g)}\,\mathbf{z}_k, \quad k = 1,\ldots,\lambda,
+\end{equation}
+其中 $\mathbf{z}_k \sim \mathcal{N}(\mathbf{0},\mathbf{I})$ 为标准正态随机向量，$\mathbf{C}^{(g)} = \mathbf{B}^{(g)}(\mathbf{D}^{(g)})^2\mathbf{B}^{(g)\top}$ 为特征值分解（$\mathbf{B}$ 为正交特征向量矩阵，$\mathbf{D}$ 为对角特征值方根矩阵）。
+
+\paragraph{步骤二：适应度评估}
+对每个候选解 $\mathbf{x}_k^{(g+1)}$ 依次执行：（i）直接以 8 维 B-Spline 控制点拼接 3 维工况参数构成 11 维代理模型输入；（ii）MoE 前向推理获取 $[\mu_T,\mu_H,\mu_{M_y},\mu_Q]$ 及各分量不确定度 $\boldsymbol{\sigma}$；（iii）Powell Hybrid 配平求解得到 $[\alpha^*,\Omega_1^*,\Omega_2^*]$；（iv）计算 $P_\text{elec} = P_\text{aero}/\eta_\text{elec}$，得到适应度值 $f(\mathbf{x}_k^{(g+1)})$。
+
+\paragraph{步骤三：均值更新}
+按适应度对 $\lambda$ 个子代排序，取前 $\mu = \lfloor\lambda/2\rfloor$ 个精英个体加权平均更新均值：
+\begin{equation}
+\mathbf{m}^{(g+1)} = \sum_{i=1}^{\mu} w_i\,\mathbf{x}_{i:\lambda}^{(g+1)},
+\end{equation}
+权重满足 $\sum_{i=1}^{\mu}w_i = 1$，$w_1 \geq w_2 \geq \cdots \geq w_\mu > 0$，通常取 $w_i \propto \ln(\mu+\tfrac{1}{2}) - \ln i$。有效精英数量定义为 $\mu_\text{eff} = \left(\sum_i w_i^2\right)^{-1}$。
+
+\paragraph{步骤四：协方差矩阵与步长自适应}
+通过累积路径向量（evolution path）实现协方差矩阵和步长的自适应更新。
+
+演化路径（累积动量）更新：
+\begin{equation}
+\mathbf{p}_c^{(g+1)} = (1-c_c)\,\mathbf{p}_c^{(g)} + \sqrt{c_c(2-c_c)\mu_\text{eff}}\;\frac{\mathbf{m}^{(g+1)}-\mathbf{m}^{(g)}}{\sigma^{(g)}},
+\end{equation}
+协方差矩阵秩1更新与秩$\mu$更新：
+\begin{equation}
+\mathbf{C}^{(g+1)} = (1-c_1-c_\mu)\,\mathbf{C}^{(g)}
+  + c_1\,\mathbf{p}_c^{(g+1)}\mathbf{p}_c^{(g+1)\top}
+  + c_\mu\sum_{i=1}^{\mu}w_i\,\mathbf{y}_{i:\lambda}\mathbf{y}_{i:\lambda}^{\top},
+\end{equation}
+其中 $\mathbf{y}_{i:\lambda} = (\mathbf{x}_{i:\lambda}^{(g+1)}-\mathbf{m}^{(g)})/\sigma^{(g)}$ 为归一化位移，$c_1,c_\mu$ 分别为秩1和秩$\mu$学习率。
+
+步长控制路径（累积步长适应，Cumulative Step-size Adaptation）：
+\begin{equation}
+\mathbf{p}_\sigma^{(g+1)} = (1-c_\sigma)\,\mathbf{p}_\sigma^{(g)}
+  + \sqrt{c_\sigma(2-c_\sigma)\mu_\text{eff}}\;\mathbf{C}^{(g)-\frac{1}{2}}\frac{\mathbf{m}^{(g+1)}-\mathbf{m}^{(g)}}{\sigma^{(g)}},
+\end{equation}
+\begin{equation}
+\sigma^{(g+1)} = \sigma^{(g)}\exp\!\left(\frac{c_\sigma}{d_\sigma}\left(\frac{\|\mathbf{p}_\sigma^{(g+1)}\|}{\mathbb{E}\|\mathcal{N}(\mathbf{0},\mathbf{I})\|} - 1\right)\right),
+\end{equation}
+其中 $\mathbb{E}\|\mathcal{N}(\mathbf{0},\mathbf{I})\| \approx \sqrt{n}\left(1 - \frac{1}{4n} + \frac{1}{21n^2}\right)$ 为 $n$ 维标准正态范数期望，$c_\sigma$、$d_\sigma$ 为步长学习率和阻尼系数。当实际演化路径长度与随机游走期望相比偏大时步长增大，偏小时收缩，从而在不同地形下自动调节搜索粒度。
+
+本研究中具体超参数设置为种群规模 $\lambda = 4 + \lfloor 3\ln 8\rfloor = 10$，初始步长 $\sigma^{(0)} = 0.3$（归一化空间 $[0,1]^8$），最大迭代代数 200 代；各超参 $c_c,c_1,c_\mu,c_\sigma,d_\sigma$ 均取 CMA-ES 标准默认值。
+
+\subsubsection{OOD 防护与双层约束}
+
+为防止优化器利用代理模型外推产生"虚假最优"，设计了两种 OOD 防护约束方案：
+
+盒约束（Box Constraint）将各维设计变量限制在训练数据 100 几何所覆盖的物理边界内，加 5\% 边距：
+\begin{equation}
+x_{\min,j} \leq x_j \leq x_{\max,j}, \quad j = 1,\ldots,8.
+\end{equation}
+
+Mahalanobis 分布约束（Distribution Constraint）将候选解约束在训练集协方差椭球内，以训练集 95\% 分位数为阈值：
+\begin{equation}
+d_{\text{M}}(\mathbf{x}) = \sqrt{(\mathbf{x} - \boldsymbol{\mu}_{\text{train}})^{\top}\,\boldsymbol{\Sigma}_{\text{train}}^{-1}\,(\mathbf{x} - \boldsymbol{\mu}_{\text{train}})} \leq d_\tau,
+\end{equation}
+其中 $\boldsymbol{\mu}_\text{train}$、$\boldsymbol{\Sigma}_\text{train}$ 为训练集几何特征的均值与协方差矩阵，$d_\tau$ 为 $\chi^2(8)$ 分布的 95\% 分位数。该约束可检测盒约束遗漏的对角线角点 OOD 区域。
+
+V4 方案在 Mahalanobis 分布约束基础上叠加 MoE 不确定度硬截断，构成双层防护：
+\begin{equation}
+\|\boldsymbol{\sigma}(\mathbf{x})\|_\infty \leq \sigma_{\max},
+\end{equation}
+其中 $\sigma_{\max}$ 取训练集样本不确定度的 95\% 分位数；超出阈值的候选解直接赋惩罚值 $f = 10^6$。
+
+\subsubsection{方法学验证状态}
+
+在正式 508 几何模型训练完成前，已用阶段性模型进行过内部链路验证：按 RotorS Iris 参数表固定机体质量 $m=1.5$ kg（重量 14.715 N），完成 QBlade 到机体系的符号适配，并确认 $\alpha \in [1^\circ,8^\circ]$、$\Omega \in [4000,6500]$ RPM 下配平器能够收敛，优化目标也按 $P_\text{elec}/V$ 下降方向工作。由于该验证使用的不是当前可达合并数据训练出的 best trial，本报告不放入对应可视化图和结果表，避免将小样本或阶段性测试误读为正式结论。
+
+正式流程为：等待 3660 工作站完成 32 组 MoE sweep 后，读取 \texttt{best\_trial/model.pth} 和合并数据的 \texttt{normalizer.pkl}，在同一质量、同一符号转换和同一迎角/转速约束下运行 200 代 CMA-ES；随后只基于该正式结果生成航程对比图、配平残差表和候选桨几何图。这样可保证论文中的优化图表全部来自当前可达最新数据和最终模型。
+
+\subsection{Star-CCM+ 高保真验证（模板就绪）}
+
+搭建 Star-CCM+ CFD 验证模板：计算域入口/出口 $10D$、总宽 $25D$，旋转域直径 $1.2D$；网格量约 700 万，阻塞比 $2.5\% < 5\%$；湍流模型 SST $k$-$\omega$，$y^+ \in [0, 1]$。已在 APC 10$\times$7 基线桨代表性工况完成对照验证，$C_T$、$C_P$、$\eta$ 误差 $\leq 5\%$，$Q$-criterion 桨尖涡结构与 LLFVW 一致。
+
+几何更换脚本已嵌入前处理流程，优化器输出的 B-Spline 控制点可自动生成三维桨叶几何并导入 Star-CCM+ 完成网格、边界条件与后处理设置，为后续批量高保真验证提供了接口。
+
+
+\section{后期拟完成的研究工作及进度安排}
+
+后续工作将按照"全量数据--模型训练--优化求解--高保真验证--流场分析--论文撰写"推进。具体安排见表~\ref{tab:future_plan}。
+
+\begin{table}[H]
+  \centering
+  \caption{后期工作进度安排}
+  \label{tab:future_plan}
+  \begin{tabularx}{\textwidth}{p{2.0cm} X p{3.2cm} p{2.8cm}}
+    \toprule
+    时间节点 & 任务内容 & 预期产出 & 风险控制 \\
+    \midrule
+    2026.06--07 & 完成 1000 几何 $\times$ 42 工况数据生成 & 全量训练集 $\sim$42K 样本 & 双机并行；逐几何保存 \\
+    2026.07 & 全量数据重训 MoE 模型；架构复测 & 最终代理模型权重 & 早停+中间存盘 \\
+    2026.07--08 & 全量模型接入配平+CMA-ES 优化；复查质量、符号和迎角约束 & 3--5 组候选优化桨 & 多初值、热启动 \\
+    2026.08 & QBlade/LLFVW 全工况回验候选桨 & 回验报告、筛选最终方案 & 批处理自动化 \\
+    2026.08--09 & Star-CCM+ 高保真 CFD 验证 & 推力/功耗/流场对比 & 仅选 1--2 个代表方案 \\
+    2026.09--11 & 论文撰写、查重、预答辩 & 终稿 + 答辩材料 & 按周提交导师审阅 \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{存在的困难与问题}
+
+\subsection{存在的问题}
+
+当前主要困难包括以下三点。第一，1000 几何全量数据生成周期较长，是后续全量训练和优化求解的关键路径。第二，整体配平求解器与优化器耦合后，可能出现部分候选几何不可配平、配平解落在迎角边界，或 QBlade 输出坐标系与机体系符号不一致的问题。第三，Star-CCM+ 高保真验证计算成本较高，无法对全部候选外形逐一开展 CFD 仿真。
+
+\subsection{解决方案}
+
+针对上述问题，拟采取以下措施。对于数据生成周期问题，继续采用 GPU 批处理和逐几何保存策略，并在部分数据完成后先行训练中间模型，减少等待时间。对于不可配平候选几何，将在优化目标中加入配平失败惩罚和变量边界限制，同时固定质量参数与坐标系适配层，使优化器逐步避开不可行区域。对于 CFD 成本问题，采用两级验证策略：先用 QBlade/LLFVW 对候选外形进行全工况回验，再选取 1--2 个代表性最终方案开展 Star-CCM+ 高保真验证和流场分析。
+
+\section{如期完成全部论文工作的可能性}
+
+综合当前进展判断，论文具备如期完成的基础。首先，论文主线已经由较宽的湍流风扰动问题收敛为前飞整体配平下的螺旋桨外形优化，研究边界清晰，后续工作目标明确。其次，关键模块已经形成：几何参数化、QBlade/LLFVW 数据生成、带不确定性的网络预测、整体配平求解器、CMA-ES 优化框架以及 Star-CCM+ 高保真验证模板均已完成或进入可执行状态。最后，后续工作主要是全量数据补齐、模型重训、优化结果获取和高保真验证，属于已有流程的扩展和收敛。
+
+若按照表~\ref{tab:future_plan} 推进，预计可在 2026 年 8 月前获得主要优化结果和高保真验证结果，2026 年 9 月进入论文集中写作与修改阶段。因此，本人认为本课题能够如期完成硕士学位论文的全部研究工作，并具备参加后续预答辩和正式答辩的条件。
+
+\section*{指导教师意见：}
+
+\vspace{6\baselineskip}
+
+\hfill 指导教师签名：\hspace{8\ccwd}
+
+\vspace{24bp}
+\hfill 年\hspace{2\ccwd}月\hspace{2\ccwd}日
+
+\section*{检查小组意见：}
+
+\vspace{6\baselineskip}
+
+\hfill 组长（签字）：\hspace{8\ccwd}
+
+\vspace{24bp}
+\hfill 年\hspace{2\ccwd}月\hspace{2\ccwd}日
