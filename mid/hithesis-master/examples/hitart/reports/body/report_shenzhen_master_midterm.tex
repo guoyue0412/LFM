@@ -299,7 +299,45 @@ FM = \frac{T^{3/2}}{\sqrt{2\rho A}\,P_\text{shaft}},
 \label{fig:sim_pipeline}
 \end{figure}
 
-自动化框架的完整逻辑如图~\ref{fig:sim_pipeline} 所示。代理模型输入/输出格式为：
+\begin{figure}[H]
+\centering
+\setlength{\fboxsep}{6pt}
+\fbox{%
+\begin{minipage}{0.94\textwidth}
+\small
+\noindent\textbf{Algorithm 1\quad 两工作站 LLFVW 数据生成与训练集构建流程}\\[-1mm]
+\rule{\textwidth}{0.4pt}
+\textbf{Require:} 几何控制点集合 $\mathcal{G}$，工况网格 $\mathcal{C}=\{\Omega,V,\alpha_{\mathrm{QBlade}}\}$，工作站集合 $\mathcal{M}=\{\text{3660},\text{7920}\}$\\
+\textbf{Ensure:} 训练样本 CSV $\mathcal{D}_{\mathrm{csv}}$，归一化训练集 $\mathcal{D}_{\mathrm{norm}}$，输出量 $[T,H,M_y,Q]$\\[-1mm]
+\rule{\textwidth}{0.4pt}
+\begin{tabularx}{\textwidth}{r@{\quad}X}
+1: & \textcolor{orange}{// ===== 几何分配与批量仿真 =====}\\
+2: & 将几何集合 $\mathcal{G}$ 按编号划分至 3660 与 7920 工作站；\\
+3: & \textbf{for} 每台工作站 $m\in\mathcal{M}$ \textbf{do}\\
+4: & \quad \textbf{for} 每个几何 $\mathbf{g}\in\mathcal{G}_m$ \textbf{do}\\
+5: & \quad\quad 由 8 维控制点生成三次 B-Spline 桨叶截面，得到 22 个 $(c,\theta)$ 截面；\\
+6: & \quad\quad \textbf{for} 每个工况 $\mathbf{c}\in\mathcal{C}$ \textbf{do}\\
+7: & \quad\quad\quad 写入 QBlade/LLFVW 工况配置，并启动 OpenCL GPU 仿真；\\
+8: & \quad\quad\quad 推进 1000 个时间步，取末 120 步均值以抑制瞬态波动；\\
+9: & \quad\quad\quad 提取 $T,H,M_y,Q$，并完成 QBlade 坐标到无人机机体系的符号转换；\\
+10: & \quad\quad\quad 追加样本 $(\Omega,V,\alpha_{\mathrm{QBlade}},\mathbf{g};T,H,M_y,Q)$；\\
+11: & \quad\quad \textbf{end for}\\
+12: & \quad\quad 几何级结果即时落盘为 pkl/csv，清理内存并切换下一几何；\\
+13: & \quad \textbf{end for}\\
+14: & \textbf{end for}\\
+15: & \textcolor{orange}{// ===== CSV 汇总、归一化与训练输入 =====}\\
+16: & 仅传输所需训练字段 CSV，不传输原始 pkl；\\
+17: & 在 3660 合并两台工作站 CSV，按几何编号构造训练/测试划分；\\
+18: & 对输入 $\mathbf{X}$ 与输出 $\mathbf{y}$ 拟合归一化器，生成 $\mathcal{D}_{\mathrm{norm}}$；\\
+19: & 将 $\mathcal{D}_{\mathrm{norm}}$ 输入 DNN、MLP+LIFT-NLL 与 MoE+LIFT-NLL 的 1500 epochs 训练/扫参流程；\\
+\end{tabularx}
+\end{minipage}%
+}
+\caption{当前数据生成与训练集构建算法流程。该流程与图~\ref{fig:sim_pipeline} 的模块关系对应，强调两工作站并行生成、CSV 级汇总和按几何编号划分，避免原始 pkl 大文件传输。}
+\label{fig:data_generation_algorithm}
+\end{figure}
+
+自动化框架的完整逻辑如图~\ref{fig:sim_pipeline} 和图~\ref{fig:data_generation_algorithm} 所示。代理模型输入/输出格式为：
 \begin{equation}
 \begin{aligned}
 \mathbf{X} &=
