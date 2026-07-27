@@ -114,6 +114,24 @@ def test_audit_rejects_disagreeing_geom_ids_and_records_unreadable_files(tmp_pat
     assert report.unreadable_files[0]["source_file"].endswith("broken.pkl")
 
 
+def test_flat_batch_filename_never_supplies_geometry_identity(tmp_path):
+    flat = {
+        "geometry": _geometry(),
+        _condition_key((4000, 10, 82)): _frame(),
+    }
+    with (tmp_path / "data_lhs_batch_b0123.pkl").open("wb") as handle:
+        pickle.dump(flat, handle)
+
+    report = audit_sources([tmp_path], expected_base_ids=[123])
+
+    assert report.selected_records == []
+    assert report.unique_geometry_count == 0
+    assert any(
+        "geometry_<id> node or stored geom_id" in error["reason"]
+        for error in report.metadata_errors
+    )
+
+
 def test_aggregate_prefers_uav_positive_qblade_aliases():
     frame = _frame(value=5.0)
 
@@ -269,12 +287,16 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
     historical.mkdir()
     supplement.mkdir()
     cp8 = np.array([0.018, 0.031, 0.014, 0.006, 52.0, 21.0, 16.0, 11.0])
+    historical_cp8 = {}
     for geom_id in range(3):
+        geometry_cp8 = cp8.copy()
+        geometry_cp8[0] += geom_id * 1e-3
+        historical_cp8[geom_id] = geometry_cp8
         write_fake_pkl(
             historical / f"historical_{geom_id}.pkl",
             geom_id=geom_id,
             conditions=BASE_CONDITIONS,
-            cp8=None,
+            cp8=geometry_cp8,
         )
 
     manifest_path = tmp_path / "manifest.json"
@@ -315,6 +337,7 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
     key_cols = ["geom_id", "RPM", "WIND", "ANGLE"]
     partition_names = (
         "historical_train__base42",
+        "historical_train_47d_only__base42",
         "geometry_id__base42",
         "geometry_id__condition_id_interp",
         "geometry_id__condition_ood_alpha1",
@@ -330,6 +353,8 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         f"twist_{index}" for index in range(22)
     ]
     for frame in frames:
+        if frame.empty:
+            continue
         assert {"RPM", "WIND", "ANGLE", *cp_columns} <= set(frame.columns)
         assert {"RPM", "WIND", "ANGLE", *section_columns} <= set(frame.columns)
         for _, row in frame.iterrows():
@@ -340,6 +365,8 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
                 rtol=0,
             )
     for name in partition_names:
+        if name == "historical_train_47d_only__base42":
+            continue
         category, condition_split = name.split("__", 1)
         assert set(frozen[name]["category"]) <= {category}
         assert set(frozen[name]["condition_split"]) <= {condition_split}
@@ -361,11 +388,30 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
     }
     all_selected_keys = set().union(*sets)
     assert len(all_selected_keys) == sum(map(len, sets)) == len(report.selected_records)
-    assert list(frozen["normalizer_inputs"].columns) == [
-        "RPM", "WIND", "ANGLE", *cp_columns, *section_columns
+    assert list(frozen["normalizer_inputs_11d"].columns) == [
+        "RPM", "WIND", "ANGLE", *cp_columns
+    ]
+    assert list(frozen["normalizer_inputs_47d"].columns) == [
+        "RPM", "WIND", "ANGLE", *section_columns
     ]
     split_payload = json.loads((output / "geometry_split_synthetic-v1.json").read_text())
-    assert set(split_payload["train"]) < {0, 1, 2}
+    split_sets = [set(split_payload[name]) for name in ("train", "validation", "test")]
+    assert all(
+        not (split_sets[i] & split_sets[j])
+        for i in range(3)
+        for j in range(i + 1, 3)
+    )
+    assert set().union(*split_sets) == {0, 1, 2}
+    assert not ({1000, 1010} & set().union(*split_sets))
+    expected_train_cp0 = sorted(
+        historical_cp8[geom_id][0] for geom_id in split_payload["train"]
+    )
+    np.testing.assert_allclose(
+        sorted(frozen["normalizer_inputs_11d"]["chord_cp_0"].unique()),
+        expected_train_cp0,
+        atol=1e-12,
+        rtol=0,
+    )
 
     acceptance_path = output / "acceptance_synthetic-v1.json"
     acceptance = json.loads(acceptance_path.read_text())
@@ -378,7 +424,9 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         "geometry_ood__condition_id_interp": 1,
         "geometry_ood__condition_ood_alpha1": 1,
         "historical_train__base42": 126,
-        "normalizer_inputs": 42,
+        "historical_train_47d_only__base42": 0,
+        "normalizer_inputs_11d": 42,
+        "normalizer_inputs_47d": 42,
     }
     assert acceptance["excluded_cp8_recoveries"] == []
     assert set(acceptance["split_ids"]) == {"train", "validation", "test"}
@@ -386,7 +434,7 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         assert hashlib.sha256((output / name).read_bytes()).hexdigest() == artifact_digest
 
 
-def test_failed_historical_cp8_recovery_stays_audited_but_not_exported(tmp_path):
+def test_failed_historical_cp8_recovery_is_exported_only_for_47d(tmp_path):
     bad_geometry = _geometry()
     bad_geometry[3, 1] += 1e-4
     node = {
@@ -399,6 +447,99 @@ def test_failed_historical_cp8_recovery_stays_audited_but_not_exported(tmp_path)
 
     report = audit_sources([tmp_path], expected_base_ids=[0])
 
+    output = tmp_path / "frozen"
+    frozen = freeze_datasets(report, output, version="47d-only-v1")
+    acceptance = json.loads((output / "acceptance_47d-only-v1.json").read_text())
+
     assert report.per_geometry_coverage[0]["present_key_count"] == 42
     assert report.excluded_cp8_recoveries[0]["geom_id"] == 0
     assert report.training_records() == []
+    only_47d = frozen["historical_train_47d_only__base42"]
+    assert len(only_47d) == 42
+    assert not any(column.startswith(("chord_cp_", "twist_cp_")) for column in only_47d)
+    assert {f"chord_{index}" for index in range(22)} <= set(only_47d)
+    assert {f"twist_{index}" for index in range(22)} <= set(only_47d)
+    assert acceptance["historical_47d_only_geometry_ids"] == [0]
+    assert acceptance["historical_47d_only_geometry_count"] == 1
+    assert acceptance["output_row_counts"]["historical_train_47d_only__base42"] == 42
+    assert frozen["normalizer_inputs_11d"].empty
+    assert frozen["normalizer_inputs_47d"].empty
+
+
+def test_stale_manifest_metadata_is_preserved_and_explicitly_excluded(tmp_path):
+    cp8 = np.array([0.018, 0.031, 0.014, 0.006, 52.0, 21.0, 16.0, 11.0])
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest_payload(cp8), sort_keys=True, separators=(",", ":"))
+    )
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    conditions = [(4000, 10, 82), (4250, 10, 82.5), (4000, 10, 89)]
+    correct_splits = {
+        _condition_key((4000, 10, 82)): "base42",
+        _condition_key((4250, 10, 82.5)): "condition_id_interp",
+        _condition_key((4000, 10, 89)): "condition_ood_alpha1",
+    }
+    write_fake_pkl(
+        tmp_path / "wrong_category.pkl",
+        geom_id=1000,
+        conditions=conditions,
+        category="geometry_ood",
+        manifest_sha256=digest,
+        generator_git_commit="abc",
+        condition_split=correct_splits,
+        cp8=cp8,
+    )
+    stale_splits = dict(correct_splits)
+    stale_splits[_condition_key((4250, 10, 82.5))] = "base42"
+    write_fake_pkl(
+        tmp_path / "wrong_split.pkl",
+        geom_id=1010,
+        conditions=conditions,
+        category="geometry_ood",
+        manifest_sha256=digest,
+        generator_git_commit="abc",
+        condition_split=stale_splits,
+        cp8=cp8,
+    )
+
+    report = audit_sources(
+        [tmp_path], expected_base_ids=[], manifest_path=manifest_path
+    )
+    output = tmp_path / "frozen"
+    frozen = freeze_datasets(report, output, version="stale-v1")
+    acceptance = json.loads((output / "acceptance_stale-v1.json").read_text())
+
+    selected = {record.key: record for record in report.selected_records}
+    assert selected[(1000, 4000, 10.0, 82.0)].category == "geometry_ood"
+    assert selected[(1010, 4250, 10.0, 82.5)].condition_split == "base42"
+    supplement_keys = set(selected)
+    exported_keys = set()
+    for name in (
+        "geometry_id__base42",
+        "geometry_id__condition_id_interp",
+        "geometry_id__condition_ood_alpha1",
+        "geometry_ood__base42",
+        "geometry_ood__condition_id_interp",
+        "geometry_ood__condition_ood_alpha1",
+    ):
+        exported_keys.update(map(tuple, frozen[name][["geom_id", "RPM", "WIND", "ANGLE"]].to_numpy()))
+    excluded_keys = {
+        (item["geom_id"], item["RPM"], item["WIND"], item["ANGLE"])
+        for item in acceptance["record_exclusions"]
+    }
+    assert not (exported_keys & excluded_keys)
+    assert exported_keys | excluded_keys == supplement_keys
+    assert len(exported_keys) == 2
+    assert len(excluded_keys) == 4
+    assert any("category_mismatch" in item["reasons"] for item in acceptance["record_exclusions"])
+    assert any(
+        "condition_split_mismatch" in item["reasons"]
+        for item in acceptance["record_exclusions"]
+    )
+    for field in (
+        "record_exclusions",
+        "unreadable_files",
+        "geom_id_disagreements",
+        "metadata_errors",
+    ):
+        assert field in acceptance

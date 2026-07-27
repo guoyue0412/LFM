@@ -61,8 +61,7 @@ PROVENANCE_COLUMNS = [
 DATA_COLUMNS = (
     KEY_COLUMNS + CP_COLUMNS + SECTION_COLUMNS + OUTPUT_COLUMNS + PROVENANCE_COLUMNS
 )
-PARTITION_NAMES = (
-    "historical_train__base42",
+EXTERNAL_PARTITION_NAMES = (
     "geometry_id__base42",
     "geometry_id__condition_id_interp",
     "geometry_id__condition_ood_alpha1",
@@ -70,8 +69,14 @@ PARTITION_NAMES = (
     "geometry_ood__condition_id_interp",
     "geometry_ood__condition_ood_alpha1",
 )
+PARTITION_NAMES = (
+    "historical_train__base42",
+    "historical_train_47d_only__base42",
+    *EXTERNAL_PARTITION_NAMES,
+)
 PARTITION_FILES = {
     "historical_train__base42": "training",
+    "historical_train_47d_only__base42": "training_47d_only",
     "geometry_id__base42": "geometry_id_base42",
     "geometry_id__condition_id_interp": "id_interpolation",
     "geometry_id__condition_ood_alpha1": "condition_ood",
@@ -103,6 +108,8 @@ class AuditRecord:
     condition_split: str
     cp8: tuple[float, ...] | None
     sections: tuple[float, ...] | None
+    is_supplement: bool
+    exclusion_reasons: tuple[str, ...]
     source_file: str
 
     @property
@@ -124,6 +131,7 @@ class AuditReport:
     geom_id_disagreements: list[dict]
     metadata_errors: list[dict]
     excluded_cp8_recoveries: list[dict]
+    record_exclusions: list[dict]
     per_geometry_coverage: dict[int, dict]
     pkl_counts: dict[str, int]
     input_paths: list[str]
@@ -158,6 +166,30 @@ class AuditReport:
                 and record.sections is not None
                 for record in geometry_records.values()
             ):
+                continue
+            records.extend(geometry_records[key] for key in BASE_CONDITION_KEYS)
+        return sorted(records, key=lambda record: record.key)
+
+    def historical_47d_only_records(self) -> list[AuditRecord]:
+        """Return complete historical base42 geometries lacking recoverable cp8."""
+        records: list[AuditRecord] = []
+        base_set = set(BASE_CONDITION_KEYS)
+        for geom_id in self.expected_base_ids:
+            geometry_records = {
+                record.condition_key: record
+                for record in self.selected_records
+                if record.geom_id == geom_id
+                and record.category == "historical_train"
+                and record.condition_key in base_set
+            }
+            if set(geometry_records) != base_set:
+                continue
+            if not all(
+                record.valid_outputs and record.sections is not None
+                for record in geometry_records.values()
+            ):
+                continue
+            if all(record.cp8 is not None for record in geometry_records.values()):
                 continue
             records.extend(geometry_records[key] for key in BASE_CONDITION_KEYS)
         return sorted(records, key=lambda record: record.key)
@@ -255,14 +287,6 @@ def _load_manifest(path: str | Path | None) -> _ManifestInfo | None:
         geometries=geometries,
         conditions=conditions,
     )
-
-
-def _geometry_id_from_filename(path: Path) -> int | None:
-    for pattern in (r"geometry_(\d+)", r"b(\d{4})"):
-        match = re.search(pattern, path.stem)
-        if match:
-            return int(match.group(1))
-    return None
 
 
 def _stored_geom_id(node: Mapping) -> int | None:
@@ -411,7 +435,7 @@ def audit_sources(
             key_id = (
                 int(GEOMETRY_KEY_PATTERN.fullmatch(geometry_key).group(1))
                 if geometry_key is not None
-                else _geometry_id_from_filename(source_file)
+                else None
             )
             try:
                 stored_id = _stored_geom_id(node)
@@ -432,18 +456,66 @@ def audit_sources(
             geom_id = stored_id if stored_id is not None else key_id
             if geom_id is None:
                 metadata_errors.append(
-                    {"source_file": str(source_file), "reason": "unable to infer geom_id"}
+                    {
+                        "source_file": str(source_file),
+                        "reason": (
+                            "geometry identity requires a geometry_<id> node or stored "
+                            "geom_id; filenames and batch IDs are ignored"
+                        ),
+                    }
                 )
                 continue
             geom_id_source = "stored_geom_id" if stored_id is not None else "inferred_geom_id"
 
             manifest_record = manifest.geometries.get(geom_id) if manifest else None
+            stored_sha = node.get("manifest_sha256", "")
+            stored_sha = stored_sha if isinstance(stored_sha, str) else ""
+            manifest_sha_match = bool(
+                manifest_record is not None and stored_sha == manifest.digest
+            )
+            node_exclusion_reasons: list[str] = []
             if manifest_record is not None:
-                category = str(manifest_record.get("category"))
+                expected_category = manifest_record.get("category")
+                stored_category = node.get("category")
+                category = stored_category if isinstance(stored_category, str) else ""
+                if category != expected_category:
+                    node_exclusion_reasons.append("category_mismatch")
+                    metadata_errors.append(
+                        {
+                            "source_file": str(source_file),
+                            "geom_id": geom_id,
+                            "reason": "category_mismatch",
+                            "stored": stored_category,
+                            "expected": expected_category,
+                        }
+                    )
+                stored_split_map = node.get("condition_split")
+                if not isinstance(stored_split_map, Mapping):
+                    stored_split_map = None
+                    node_exclusion_reasons.append("condition_split_not_mapping")
+                    metadata_errors.append(
+                        {
+                            "source_file": str(source_file),
+                            "geom_id": geom_id,
+                            "reason": "condition_split_not_mapping",
+                        }
+                    )
+                if not manifest_sha_match:
+                    node_exclusion_reasons.append("manifest_sha256_mismatch")
+                    metadata_errors.append(
+                        {
+                            "source_file": str(source_file),
+                            "geom_id": geom_id,
+                            "reason": "manifest_sha256_mismatch",
+                            "stored": stored_sha,
+                            "expected": manifest.digest,
+                        }
+                    )
                 try:
                     cp8, sections = _manifest_geometry(node, geom_id, manifest)
                 except ValueError as error:
                     cp8, sections = None, None
+                    node_exclusion_reasons.append("manifest_geometry_mismatch")
                     excluded_cp8.append(
                         {
                             "geom_id": geom_id,
@@ -453,10 +525,9 @@ def audit_sources(
                     )
             else:
                 category = "historical_train"
+                stored_split_map = None
                 try:
                     recovered_sections = _geometry_sections(node.get("geometry"))
-                    recovery = recover_cp8(recovered_sections, tolerance=1e-10)
-                    cp8 = tuple(float(value) for value in recovery.cp8)
                     sections = tuple(float(value) for value in recovered_sections)
                 except (TypeError, ValueError) as error:
                     cp8, sections = None, None
@@ -467,12 +538,19 @@ def audit_sources(
                             "reason": str(error),
                         }
                     )
-
-            stored_sha = node.get("manifest_sha256", "")
-            stored_sha = stored_sha if isinstance(stored_sha, str) else ""
-            manifest_sha_match = bool(
-                manifest_record is not None and stored_sha == manifest.digest
-            )
+                else:
+                    try:
+                        recovery = recover_cp8(recovered_sections, tolerance=1e-10)
+                        cp8 = tuple(float(value) for value in recovery.cp8)
+                    except ValueError as error:
+                        cp8 = None
+                        excluded_cp8.append(
+                            {
+                                "geom_id": geom_id,
+                                "source_file": str(source_file),
+                                "reason": str(error),
+                            }
+                        )
             generator_commit = node.get("generator_git_commit", "")
             generator_commit = generator_commit if isinstance(generator_commit, str) else ""
             mtime = source_file.stat().st_mtime
@@ -493,34 +571,56 @@ def audit_sources(
                 if condition is None:
                     continue
                 if manifest_record is not None:
-                    condition_split = manifest.conditions.get((geom_id, condition))
-                    if condition_split is None:
+                    expected_split = manifest.conditions.get((geom_id, condition))
+                    stored_split = (
+                        stored_split_map.get(case_key)
+                        if stored_split_map is not None
+                        else None
+                    )
+                    condition_split = stored_split if isinstance(stored_split, str) else ""
+                    exclusion_reasons = list(node_exclusion_reasons)
+                    if expected_split is None:
+                        exclusion_reasons.append("condition_absent_from_manifest")
                         metadata_errors.append(
                             {
                                 "source_file": str(source_file),
                                 "geom_id": geom_id,
                                 "condition_key": list(condition),
-                                "reason": "condition absent from exact manifest",
+                                "reason": "condition_absent_from_manifest",
                             }
                         )
-                        continue
+                    elif stored_split != expected_split:
+                        exclusion_reasons.append("condition_split_mismatch")
+                        metadata_errors.append(
+                            {
+                                "source_file": str(source_file),
+                                "geom_id": geom_id,
+                                "condition_key": list(condition),
+                                "reason": "condition_split_mismatch",
+                                "stored": stored_split,
+                                "expected": expected_split,
+                            }
+                        )
                 else:
                     condition_split = (
                         "base42" if condition in BASE_CONDITION_KEYS else "undeclared"
                     )
+                    exclusion_reasons = []
                 if isinstance(case_frame, pd.DataFrame):
                     outputs, sign_source = aggregate_timeseries(case_frame, last_n=last_n)
                 else:
                     outputs, sign_source = {}, "invalid_non_dataframe"
+                valid_outputs = set(outputs) == set(OUTPUT_COLUMNS) and all(
+                    np.isfinite(value) for value in outputs.values()
+                )
+                if manifest_record is not None and not valid_outputs:
+                    exclusion_reasons.append("invalid_outputs")
                 record = AuditRecord(
                     geom_id=geom_id,
                     condition_key=condition,
                     outputs=outputs,
                     output_sign_source=sign_source,
-                    valid_outputs=(
-                        set(outputs) == set(OUTPUT_COLUMNS)
-                        and all(np.isfinite(value) for value in outputs.values())
-                    ),
+                    valid_outputs=valid_outputs,
                     geom_id_source=geom_id_source,
                     manifest_sha_match=manifest_sha_match,
                     manifest_sha256=stored_sha,
@@ -530,6 +630,8 @@ def audit_sources(
                     condition_split=condition_split,
                     cp8=cp8,
                     sections=sections,
+                    is_supplement=manifest_record is not None,
+                    exclusion_reasons=tuple(dict.fromkeys(exclusion_reasons)),
                     source_file=str(source_file),
                 )
                 candidates[record.key].append(record)
@@ -605,6 +707,18 @@ def audit_sources(
         (entry["geom_id"], entry["source_file"], entry["reason"]): entry
         for entry in excluded_cp8
     }
+    record_exclusions = [
+        {
+            "geom_id": record.key[0],
+            "RPM": record.key[1],
+            "WIND": record.key[2],
+            "ANGLE": record.key[3],
+            "source_file": record.source_file,
+            "reasons": list(record.exclusion_reasons),
+        }
+        for record in selected_records
+        if record.is_supplement and record.exclusion_reasons
+    ]
     return AuditReport(
         expected_base_ids=expected_ids,
         selected_records=selected_records,
@@ -617,6 +731,7 @@ def audit_sources(
         ),
         metadata_errors=metadata_errors,
         excluded_cp8_recoveries=list(excluded_unique.values()),
+        record_exclusions=record_exclusions,
         per_geometry_coverage=per_geometry_coverage,
         pkl_counts=pkl_counts,
         input_paths=input_paths,
@@ -654,16 +769,15 @@ def geometry_grouped_split(
     }
 
 
-def _record_row(record: AuditRecord) -> dict:
-    if record.cp8 is None or record.sections is None:
-        raise ValueError("cannot export a record without cp8 and sections")
+def _record_row(record: AuditRecord, *, include_cp8: bool = True) -> dict:
+    if record.sections is None or (include_cp8 and record.cp8 is None):
+        raise ValueError("record lacks the geometry representation required for export")
     rpm, wind, angle = record.condition_key
     row = {
         "geom_id": record.geom_id,
         "RPM": rpm,
         "WIND": wind,
         "ANGLE": angle,
-        **{column: record.cp8[index] for index, column in enumerate(CP_COLUMNS)},
         **{
             column: record.sections[index]
             for index, column in enumerate(SECTION_COLUMNS)
@@ -677,12 +791,24 @@ def _record_row(record: AuditRecord) -> dict:
         "generator_git_commit": record.generator_git_commit,
         "source_file": record.source_file,
     }
+    if include_cp8:
+        row.update(
+            {column: record.cp8[index] for index, column in enumerate(CP_COLUMNS)}
+        )
     return row
 
 
-def _frame(records: Sequence[AuditRecord]) -> pd.DataFrame:
-    rows = [_record_row(record) for record in sorted(records, key=lambda item: item.key)]
-    return pd.DataFrame(rows, columns=DATA_COLUMNS)
+def _frame(
+    records: Sequence[AuditRecord], *, include_cp8: bool = True
+) -> pd.DataFrame:
+    rows = [
+        _record_row(record, include_cp8=include_cp8)
+        for record in sorted(records, key=lambda item: item.key)
+    ]
+    columns = DATA_COLUMNS if include_cp8 else [
+        column for column in DATA_COLUMNS if column not in CP_COLUMNS
+    ]
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _json_ready(value):
@@ -712,54 +838,76 @@ def freeze_datasets(
     git_commits: Mapping[str, str] | None = None,
     seed: int = SEED,
 ) -> dict[str, pd.DataFrame]:
-    """Write seven lossless, key-disjoint partitions and their audit evidence."""
+    """Write disjoint historical/external partitions and their audit evidence."""
     if not version or not re.fullmatch(r"[A-Za-z0-9._-]+", version):
         raise ValueError("version must contain only letters, digits, dot, underscore, or dash")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     training_records = report.training_records()
+    historical_47d_only = report.historical_47d_only_records()
     complete_ids = sorted({record.geom_id for record in training_records})
     split_ids = geometry_grouped_split(complete_ids, seed=seed)
     partition_records: dict[str, list[AuditRecord]] = {
         name: [] for name in PARTITION_NAMES
     }
     partition_records["historical_train__base42"] = training_records
+    partition_records["historical_train_47d_only__base42"] = historical_47d_only
     for record in report.selected_records:
-        if record.category == "historical_train":
+        if not record.is_supplement:
             continue
-        if (
-            not record.valid_outputs
-            or record.cp8 is None
-            or record.sections is None
-            or not record.manifest_sha_match
-        ):
+        if record.exclusion_reasons:
             continue
         partition_name = f"{record.category}__{record.condition_split}"
-        if partition_name not in partition_records:
+        if partition_name not in EXTERNAL_PARTITION_NAMES:
             raise ValueError(
                 f"record {record.key} has unexportable partition {partition_name!r}"
             )
         partition_records[partition_name].append(record)
 
     partitions = {
-        name: _frame(partition_records[name]) for name in PARTITION_NAMES
+        name: _frame(
+            partition_records[name],
+            include_cp8=name != "historical_train_47d_only__base42",
+        )
+        for name in PARTITION_NAMES
     }
+    supplement_keys = {
+        record.key for record in report.selected_records if record.is_supplement
+    }
+    exported_supplement_keys = {
+        record.key
+        for name in EXTERNAL_PARTITION_NAMES
+        for record in partition_records[name]
+    }
+    excluded_supplement_keys = {
+        (entry["geom_id"], entry["RPM"], entry["WIND"], entry["ANGLE"])
+        for entry in report.record_exclusions
+    }
+    if exported_supplement_keys & excluded_supplement_keys:
+        raise RuntimeError("a supplement key cannot be both exported and excluded")
+    if exported_supplement_keys | excluded_supplement_keys != supplement_keys:
+        raise RuntimeError("every selected supplement key must be exported or excluded")
     train_id_set = set(split_ids["train"])
     normalizer_records = [
         record for record in training_records if record.geom_id in train_id_set
     ]
-    normalizer_columns = ["RPM", "WIND", "ANGLE", *CP_COLUMNS, *SECTION_COLUMNS]
-    normalizer_inputs = _frame(normalizer_records)[normalizer_columns]
+    normalizer_11d_columns = ["RPM", "WIND", "ANGLE", *CP_COLUMNS]
+    normalizer_47d_columns = ["RPM", "WIND", "ANGLE", *SECTION_COLUMNS]
+    normalizer_inputs_11d = _frame(normalizer_records)[normalizer_11d_columns]
+    normalizer_inputs_47d = _frame(normalizer_records)[normalizer_47d_columns]
 
     artifacts: list[Path] = []
     for name, frame in partitions.items():
         path = output_dir / f"{PARTITION_FILES[name]}_{version}.csv"
         frame.to_csv(path, index=False)
         artifacts.append(path)
-    normalizer_path = output_dir / f"normalizer_inputs_{version}.csv"
-    normalizer_inputs.to_csv(normalizer_path, index=False)
-    artifacts.append(normalizer_path)
+    normalizer_11d_path = output_dir / f"normalizer_inputs_11d_{version}.csv"
+    normalizer_inputs_11d.to_csv(normalizer_11d_path, index=False)
+    artifacts.append(normalizer_11d_path)
+    normalizer_47d_path = output_dir / f"normalizer_inputs_47d_{version}.csv"
+    normalizer_inputs_47d.to_csv(normalizer_47d_path, index=False)
+    artifacts.append(normalizer_47d_path)
 
     split_path = output_dir / f"geometry_split_{version}.json"
     _write_json(split_path, {"seed": seed, **split_ids})
@@ -776,6 +924,7 @@ def freeze_datasets(
         "geom_id_disagreements": report.geom_id_disagreements,
         "metadata_errors": report.metadata_errors,
         "excluded_cp8_recoveries": report.excluded_cp8_recoveries,
+        "record_exclusions": report.record_exclusions,
     }
     coverage_json_path = output_dir / f"coverage_{version}.json"
     _write_json(coverage_json_path, coverage_payload)
@@ -806,8 +955,12 @@ def freeze_datasets(
     artifact_sha256 = {path.name: _sha256(path) for path in sorted(artifacts)}
     output_row_counts = {
         **{name: len(frame) for name, frame in partitions.items()},
-        "normalizer_inputs": len(normalizer_inputs),
+        "normalizer_inputs_11d": len(normalizer_inputs_11d),
+        "normalizer_inputs_47d": len(normalizer_inputs_47d),
     }
+    historical_47d_only_ids = sorted(
+        {record.geom_id for record in historical_47d_only}
+    )
     acceptance = {
         "version": version,
         "seed": seed,
@@ -824,6 +977,15 @@ def freeze_datasets(
         "duplicates": report.duplicate_decisions,
         "missing_keys": report.missing_keys,
         "excluded_cp8_recoveries": report.excluded_cp8_recoveries,
+        "record_exclusions": report.record_exclusions,
+        "unreadable_files": report.unreadable_files,
+        "geom_id_disagreements": report.geom_id_disagreements,
+        "metadata_errors": report.metadata_errors,
+        "historical_47d_only_geometry_ids": historical_47d_only_ids,
+        "historical_47d_only_geometry_count": len(historical_47d_only_ids),
+        "supplement_selected_key_count": len(supplement_keys),
+        "supplement_exported_key_count": len(exported_supplement_keys),
+        "supplement_excluded_key_count": len(excluded_supplement_keys),
         "output_row_counts": output_row_counts,
         "split_ids": split_ids,
         "artifact_sha256": artifact_sha256,
@@ -833,7 +995,11 @@ def freeze_datasets(
     acceptance_path.with_suffix(acceptance_path.suffix + ".sha256").write_text(
         f"{_sha256(acceptance_path)}\n"
     )
-    return {**partitions, "normalizer_inputs": normalizer_inputs}
+    return {
+        **partitions,
+        "normalizer_inputs_11d": normalizer_inputs_11d,
+        "normalizer_inputs_47d": normalizer_inputs_47d,
+    }
 
 
 def _git_commit(repo: Path) -> str:
