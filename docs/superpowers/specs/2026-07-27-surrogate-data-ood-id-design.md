@@ -14,6 +14,13 @@
 - 21 个额外工况仅用于验证，不混入正式训练集；其中 `ANGLE=89 deg` 必须显式标记为 condition OOD，不能据此宣称 1 deg 已成为全几何域内训练工况。
 - 新几何 ID 固定为：ID 插值 `1000--1009`，几何 OOD `1010--1019`。
 
+### 1.1 版本化 manifest 契约
+
+- manifest 由 `optimization_v2.tools.supplement_manifest` 从历史扁平 CSV 生成；输入必须含有 `geom_idx`、`chord_0..21` 与 `twist_0..21`。
+- 历史截面只使用 `optimization_v2.geometry` 的 B-Spline knots 与径向站位反解为 `cp8`（顺序为 4 chord 后 4 twist），再严格回代。回代最大绝对误差大于 `1e-10`、或同一 `geom_idx` 的可回代记录不一致时，该几何不得参与边界统计，且必须列入 `recovery_audit`。
+- 控制点边界仅由审计通过的历史几何各维实际 min/max 导出；ID 样本以 seed `20260727` 的 8D LHS 在归一化 `[0.1, 0.9]^8` 内生成。几何 OOD 样本由相应 ID 样本复制后，仅一维越过历史边界 5% 的该维跨度。
+- 每个 geometry manifest record 固定包含 `geom_id`、`category`、`seed`、`cp8`、44 个 `sections` 和 63 个带类别的 conditions（`base42`、`condition_id_interp`、`condition_ood_alpha1`）。输出采用 canonical JSON，并写入同名 `.sha256` sidecar。
+
 ## 2. 可选方案与选择
 
 ### 方案 A：两类几何并加入受控的 1 deg 条件 OOD（采用）
