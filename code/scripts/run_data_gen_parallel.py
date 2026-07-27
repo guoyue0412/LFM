@@ -31,23 +31,293 @@
 """
 
 import argparse
+import hashlib
 import importlib
+import json
 import multiprocessing as mp
 import os
 import pickle
 import shutil
+import subprocess
 import sys
 import time
 import traceback
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 LFM_ROOT = Path(__file__).resolve().parent.parent
+if str(LFM_ROOT) not in sys.path:
+    sys.path.insert(0, str(LFM_ROOT))
+
+from optimization_v2.geometry import GEOMETRY_R, cp_to_sections
+
 SUBMODULE_ROOT = LFM_ROOT / "Propeller_project-main"
 SUB_CODE_ROOT = SUBMODULE_ROOT / "code" / "Simulation_QBlade"
 SUB_DATA_ROOT = SUBMODULE_ROOT / "QBlade_data"
 SUB_LIB_ROOT = SUBMODULE_ROOT / "QBladeCE_2.0.8.6"
+CONDITION_SPLITS = frozenset(
+    {"base42", "condition_id_interp", "condition_ood_alpha1"}
+)
+GEOMETRY_CATEGORIES = frozenset({"geometry_id", "geometry_ood"})
+
+
+class LoadedManifest(dict):
+    """Decoded manifest payload carrying the digest of its source bytes."""
+
+    def __init__(self, payload: dict, sha256: str):
+        super().__init__(payload)
+        self.sha256 = sha256
+
+
+@dataclass(frozen=True)
+class ManifestTask:
+    """Serializable, exact work item derived from one manifest geometry."""
+
+    geom_id: int
+    category: str
+    cp8: np.ndarray
+    geometry: np.ndarray
+    conditions: tuple[tuple[float, float, float, str], ...]
+    seed: int
+    manifest_sha256: str
+
+    @property
+    def sections(self) -> np.ndarray:
+        return np.concatenate((self.geometry[:, 1], self.geometry[:, 2]))
+
+    @property
+    def condition_splits(self) -> dict[str, int]:
+        return dict(Counter(split for _, _, _, split in self.conditions))
+
+
+def _checked_digest(actual: str, expected: str, source: str) -> None:
+    expected = expected.strip().lower()
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+        raise ValueError(f"invalid SHA-256 value from {source}: {expected!r}")
+    if actual != expected:
+        raise ValueError(f"{source} SHA-256 mismatch: expected {expected}, got {actual}")
+
+
+def load_manifest(
+    path: str | Path, expected_sha256: str | None = None
+) -> LoadedManifest:
+    """Load JSON and verify any explicit/sidecar digest against exact file bytes."""
+    manifest_path = Path(path)
+    payload_bytes = manifest_path.read_bytes()
+    digest = hashlib.sha256(payload_bytes).hexdigest()
+    if expected_sha256 is not None:
+        _checked_digest(digest, expected_sha256, "manifest")
+    sidecar = manifest_path.with_suffix(manifest_path.suffix + ".sha256")
+    if sidecar.exists():
+        sidecar_parts = sidecar.read_text().split()
+        if not sidecar_parts:
+            raise ValueError(f"empty manifest SHA-256 sidecar: {sidecar}")
+        _checked_digest(digest, sidecar_parts[0], "sidecar")
+    payload = json.loads(payload_bytes)
+    if not isinstance(payload, dict):
+        raise ValueError("manifest root must be a JSON object")
+    return LoadedManifest(payload, digest)
+
+
+def _manifest_array(value: object, shape: tuple[int, ...], label: str) -> np.ndarray:
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"expected numeric {label}") from error
+    if array.shape != shape:
+        raise ValueError(f"expected {label} shape {shape}, got {array.shape}")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"expected finite {label}")
+    return array
+
+
+def _manifest_number(record: dict, key: str, label: str) -> float:
+    try:
+        value = float(record[key])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"expected numeric {label}.{key}") from error
+    if not np.isfinite(value):
+        raise ValueError(f"expected finite {label}.{key}")
+    return value
+
+
+def build_manifest_tasks(
+    manifest: LoadedManifest, geom_ids: set[int] | None = None
+) -> list[ManifestTask]:
+    """Build exact geometry/condition tasks from a loaded manifest."""
+    if manifest.get("manifest_version") != 1:
+        raise ValueError(f"unsupported manifest_version: {manifest.get('manifest_version')!r}")
+    records = manifest.get("geometries")
+    if not isinstance(records, list) or not records:
+        raise ValueError("manifest geometries must be a non-empty list")
+
+    seen_geom_ids: set[int] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("manifest geometry records must be objects")
+        geom_id = record.get("geom_id")
+        if isinstance(geom_id, bool) or not isinstance(geom_id, int):
+            raise ValueError(f"geom_id must be an integer: {geom_id!r}")
+        if geom_id in seen_geom_ids:
+            raise ValueError(f"duplicate geom_id: {geom_id}")
+        seen_geom_ids.add(geom_id)
+
+    if geom_ids is not None:
+        missing = geom_ids - seen_geom_ids
+        if missing:
+            raise ValueError(f"requested geom IDs absent from manifest: {sorted(missing)}")
+
+    tasks = []
+    for record in records:
+        geom_id = record["geom_id"]
+        if geom_ids is not None and geom_id not in geom_ids:
+            continue
+        geometry_category = record.get("category")
+        if geometry_category not in GEOMETRY_CATEGORIES:
+            raise ValueError(
+                f"geometry {geom_id}: unknown geometry category {geometry_category!r}"
+            )
+        cp8 = _manifest_array(record.get("cp8"), (8,), "cp8")
+        sections = _manifest_array(record.get("sections"), (44,), "sections")
+        rebuilt = cp_to_sections(cp8)
+        if not np.array_equal(sections, rebuilt):
+            raise ValueError(f"geometry {geom_id}: cp8-section mismatch")
+        geometry = np.column_stack((GEOMETRY_R, sections[:22], sections[22:]))
+        declared_conditions = record.get("conditions")
+        if not isinstance(declared_conditions, list) or not declared_conditions:
+            raise ValueError(f"geometry {geom_id}: conditions must be a non-empty list")
+        conditions_list = []
+        seen_condition_keys: set[tuple[float, float, float]] = set()
+        for index, condition in enumerate(declared_conditions):
+            if not isinstance(condition, dict):
+                raise ValueError(f"geometry {geom_id}: condition {index} must be an object")
+            label = f"geometry {geom_id} condition {index}"
+            rpm = _manifest_number(condition, "rpm", label)
+            wind = _manifest_number(condition, "wind", label)
+            angle = _manifest_number(condition, "angle", label)
+            split = condition.get("category")
+            if split not in CONDITION_SPLITS:
+                raise ValueError(
+                    f"geometry {geom_id}: unknown condition split {split!r}"
+                )
+            if wind != 10.0:
+                raise ValueError(f"geometry {geom_id}: wind must equal 10 m/s, got {wind}")
+            key = (rpm, wind, angle)
+            if key in seen_condition_keys:
+                raise ValueError(f"geometry {geom_id}: duplicate condition key {key}")
+            seen_condition_keys.add(key)
+            conditions_list.append((rpm, wind, angle, split))
+        conditions = tuple(conditions_list)
+        seed = record.get("seed")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError(f"geometry {geom_id}: seed must be an integer")
+        tasks.append(
+            ManifestTask(
+                geom_id=geom_id,
+                category=geometry_category,
+                cp8=cp8,
+                geometry=geometry,
+                conditions=conditions,
+                seed=seed,
+                manifest_sha256=manifest.sha256,
+            )
+        )
+    return tasks
+
+
+def parse_geom_ids(value: str | None) -> set[int] | None:
+    """Parse a comma-separated exact manifest geometry-ID subset."""
+    if value is None:
+        return None
+    try:
+        parts = [part.strip() for part in value.split(",")]
+        if not parts or any(not part for part in parts):
+            raise ValueError
+        return {int(part) for part in parts}
+    except ValueError as error:
+        raise ValueError("--geom-ids must be comma-separated integers") from error
+
+
+def _condition_split_map(task: ManifestTask) -> dict[str, str]:
+    return {
+        condition_key(rpm, wind, angle): split
+        for rpm, wind, angle, split in task.conditions
+    }
+
+
+def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
+    if not isinstance(node, dict):
+        return False
+    expected_splits = _condition_split_map(task)
+    condition_keys = {key for key in node if isinstance(key, str) and key.startswith("RPM")}
+    try:
+        control_points = np.asarray(node["control_points"], dtype=np.float64)
+        geometry = np.asarray(node["geometry"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        node.get("geom_id") == task.geom_id
+        and node.get("manifest_sha256") == task.manifest_sha256
+        and node.get("category") == task.category
+        and node.get("seed") == task.seed
+        and node.get("condition_split") == expected_splits
+        and condition_keys == set(expected_splits)
+        and np.array_equal(control_points, task.cp8)
+        and np.array_equal(geometry, task.geometry)
+    )
+
+
+def find_completed_manifest_ids(
+    output_dir: str | Path, tasks: list[ManifestTask]
+) -> set[int]:
+    """Return IDs backed by at least one exact, complete manifest result node."""
+    task_by_id = {task.geom_id: task for task in tasks}
+    completed: set[int] = set()
+    for path in sorted(Path(output_dir).glob("*.pkl")):
+        try:
+            with path.open("rb") as handle:
+                payload = pickle.load(handle)
+        except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for geom_id, task in task_by_id.items():
+            node = payload.get(f"geometry_{geom_id}")
+            if _is_complete_manifest_node(node, task):
+                completed.add(geom_id)
+    return completed
+
+
+def prepare_manifest_run(
+    manifest_path: str | Path,
+    geom_ids: set[int] | None,
+    expected_sha256: str | None,
+    output_dir: str | Path,
+) -> tuple[list[ManifestTask], set[int], str]:
+    """Load, validate, subset, and resume-filter a manifest without QBlade imports."""
+    manifest = load_manifest(manifest_path, expected_sha256=expected_sha256)
+    selected = build_manifest_tasks(manifest, geom_ids=geom_ids)
+    completed = find_completed_manifest_ids(output_dir, selected)
+    pending = [task for task in selected if task.geom_id not in completed]
+    return pending, completed, manifest.sha256
+
+
+def output_filename(
+    tag: str,
+    stamp: str,
+    batch_number: int,
+    batched: bool,
+    manifest_sha256: str | None = None,
+) -> str:
+    """Build an output filename, including manifest provenance when present."""
+    manifest_tag = (
+        f"_manifest-{manifest_sha256[:12]}" if manifest_sha256 is not None else ""
+    )
+    suffix = f"_b{batch_number:04d}" if batched else ""
+    return f"data_{tag}{manifest_tag}_{stamp}{suffix}.pkl"
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +335,12 @@ def parse_args() -> argparse.Namespace:
                    help="强制 CPU 模式（GPU 路径在 propeller 工况下 hang，详见 RESEARCH_LOG #11）")
     p.add_argument("--geometry-npy", type=str, default=None,
                    help="形状 (N, 22, 3) 的几何 numpy 文件；省略则只跑 baseline 1 个几何")
+    p.add_argument("--manifest", type=str, default=None,
+                   help="Task 1 生成的 canonical JSON manifest；提供后按精确 geom_id/工况运行")
+    p.add_argument("--geom-ids", type=str, default=None,
+                   help="逗号分隔的精确 manifest geom_id 子集")
+    p.add_argument("--manifest-sha256", type=str, default=None,
+                   help="可选的 manifest 文件字节 SHA-256；存在 sidecar 时也会自动校验")
     p.add_argument("--first-n-geoms", type=int, default=None,
                    help="只跑前 N 个几何，用于产能基线测试")
     p.add_argument("--start-idx", type=int, default=0,
@@ -156,11 +432,82 @@ def worker_init(worktree_root: str, omp_threads: int) -> None:
     print(f"[worker {os.getpid()}] ready, cwd={os.getcwd()}", flush=True)
 
 
+def condition_key(rpm: float, wind: float, angle: float) -> str:
+    """Return the stable legacy-compatible key for one declared condition."""
+    return f"RPM{rpm:g}_Wind{wind:g}_Angle{angle:g}"
+
+
+def _generator_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(LFM_ROOT), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _worker_run_manifest(
+    manifest_task: ManifestTask, num_timesteps: int | None, device: str
+) -> tuple[int, dict | None, str | None]:
+    pid = os.getpid()
+    t0 = time.time()
+    sim = None
+    try:
+        sim = _SIMULATION(
+            file_path=_config.file_path,
+            geometry_baseline=_config.geometry_baseline,
+            device_type=device,
+            number_of_timesteps=num_timesteps or _config.number_of_timesteps,
+        )
+        sim.change_propeller_geometry(section_data=manifest_task.geometry)
+        condition_results = {}
+        split_map = {}
+        for rpm, wind, angle, split in manifest_task.conditions:
+            frame = sim.run_one_simulation(RPM=rpm, WIND_SPEED=wind, ANGLE=angle)
+            if frame is None or getattr(frame, "empty", False):
+                raise RuntimeError(f"empty QBlade result for {(rpm, wind, angle)}")
+            key = condition_key(rpm, wind, angle)
+            condition_results[key] = frame
+            split_map[key] = split
+
+        result = {
+            "geometry": manifest_task.geometry.copy(),
+            **condition_results,
+            "geom_id": manifest_task.geom_id,
+            "category": manifest_task.category,
+            "control_points": manifest_task.cp8.tolist(),
+            "condition_split": split_map,
+            "seed": manifest_task.seed,
+            "manifest_sha256": manifest_task.manifest_sha256,
+            "generator_git_commit": _generator_git_commit(),
+        }
+        elapsed = time.time() - t0
+        print(
+            f"[worker {pid}] geom {manifest_task.geom_id} 完成 "
+            f"({elapsed:.1f}s, {len(manifest_task.conditions)} 工况)",
+            flush=True,
+        )
+        return (manifest_task.geom_id, result, None)
+    except Exception as error:
+        err = f"{type(error).__name__}: {error}\n{traceback.format_exc()}"
+        print(f"[worker {pid}] geom {manifest_task.geom_id} FAIL: {err}", flush=True)
+        return (manifest_task.geom_id, None, err)
+    finally:
+        close = getattr(sim, "close", None)
+        if callable(close):
+            close()
+
+
 def worker_run(task: tuple) -> tuple:
     """单 worker 处理一个几何：返回 (geom_idx, label, all_simulation_data 或 None)。
 
     Pool.map 会自动分发 task 到空闲 worker。
     """
+    if len(task) == 3 and isinstance(task[0], ManifestTask):
+        return _worker_run_manifest(*task)
+
     geom_idx, geom_array, num_timesteps, device = task
     pid = os.getpid()
     t0 = time.time()
@@ -213,40 +560,85 @@ def main() -> int:
     args = parse_args()
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    manifest_digest: str | None = None
 
-    # 在主进程加载 baseline geometry（仅用于 task 列表的几何数据）
-    # 临时 chdir 一次，读完恢复
-    saved_cwd = os.getcwd()
-    os.chdir(SUB_CODE_ROOT)
-    sys.path.insert(0, str(SUB_CODE_ROOT))
-    import config as _main_cfg  # noqa: E402
-    baseline = _main_cfg.geometry_baseline
-    os.chdir(saved_cwd)
+    if args.manifest is not None:
+        legacy_selectors = (
+            args.geometry_npy is not None
+            or args.first_n_geoms is not None
+            or args.start_idx != 0
+            or args.end_idx is not None
+        )
+        if legacy_selectors:
+            sys.exit(
+                "✖ --manifest cannot be combined with --geometry-npy, --first-n-geoms, "
+                "--start-idx, or --end-idx; use --geom-ids for exact manifest IDs"
+            )
+        try:
+            requested_ids = parse_geom_ids(args.geom_ids)
+            manifest_tasks, completed_ids, manifest_digest = prepare_manifest_run(
+                manifest_path=args.manifest,
+                geom_ids=requested_ids,
+                expected_sha256=args.manifest_sha256,
+                output_dir=out_dir,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            sys.exit(f"✖ manifest validation failed: {error}")
 
-    geometries = load_geometries(args.geometry_npy, baseline, args.first_n_geoms)
+        selected_count = len(manifest_tasks) + len(completed_ids)
+        print(
+            f"▸ manifest {manifest_digest[:12]}: selected {selected_count}, "
+            f"validated resume {len(completed_ids)}, pending {len(manifest_tasks)}"
+        )
+        if completed_ids:
+            print(f"▸ 跳过已完整 geom_id: {sorted(completed_ids)}")
+        if not manifest_tasks:
+            print("✅ 所选 manifest 几何均已有完整且元数据匹配的输出")
+            return 0
+        tasks = [
+            (task, args.num_timesteps, args.device) for task in manifest_tasks
+        ]
+    else:
+        if args.geom_ids is not None or args.manifest_sha256 is not None:
+            sys.exit("✖ --geom-ids/--manifest-sha256 require --manifest")
 
-    # 切片：支持 --start-idx / --end-idx 断点续传
-    start = max(0, args.start_idx)
-    end = args.end_idx if args.end_idx is not None else len(geometries)
-    end = min(end, len(geometries))
-    if start >= end:
-        sys.exit(f"✖ start-idx={start} >= end-idx={end}，无几何可跑")
-    selected = [(global_idx, geom)
-                for global_idx, geom in enumerate(geometries)
-                if start <= global_idx < end]
-    n_geoms = len(selected)
+        # Legacy geometry-npy/baseline mode: preserve positional global indices.
+        saved_cwd = os.getcwd()
+        try:
+            os.chdir(SUB_CODE_ROOT)
+            sys.path.insert(0, str(SUB_CODE_ROOT))
+            import config as _main_cfg  # noqa: E402
+            baseline = _main_cfg.geometry_baseline
+        finally:
+            os.chdir(saved_cwd)
+
+        geometries = load_geometries(args.geometry_npy, baseline, args.first_n_geoms)
+        start = max(0, args.start_idx)
+        end = args.end_idx if args.end_idx is not None else len(geometries)
+        end = min(end, len(geometries))
+        if start >= end:
+            sys.exit(f"✖ start-idx={start} >= end-idx={end}，无几何可跑")
+        selected = [
+            (global_idx, geometry)
+            for global_idx, geometry in enumerate(geometries)
+            if start <= global_idx < end
+        ]
+        print(
+            f"▸ 几何总数 {len(geometries)}, 本次跑 [{start}, {end}) = {len(selected)} 个"
+        )
+        tasks = [
+            (global_idx, geometry, args.num_timesteps, args.device)
+            for global_idx, geometry in selected
+        ]
+
+    n_geoms = len(tasks)
     n_workers = min(args.workers, n_geoms) if n_geoms > 0 else 1
-
-    print(f"▸ 几何总数 {len(geometries)}, 本次跑 [{start}, {end}) = {n_geoms} 个")
     print(f"▸ workers: {n_workers}, omp/worker: {args.omp_threads}, "
           f"device: {args.device}, timesteps: {args.num_timesteps or '<default>'}")
     if args.batch_size > 0:
         print(f"▸ 分批落盘: 每 {args.batch_size} 几何写一个 pkl")
     print(f"▸ 工作目录父级: {args.worktree_root}/lfm_w<pid>/")
     print(f"▸ submodule: {SUBMODULE_ROOT}")
-
-    tasks = [(global_idx, geom, args.num_timesteps, args.device)
-             for global_idx, geom in selected]
 
     # 用 fork 上下文（子进程继承 LD_LIBRARY_PATH 与 sys.path）
     # spawn 也可以但启动慢、需要重新 import；fork 在 Linux 上更高效
@@ -264,8 +656,13 @@ def main() -> int:
         nonlocal aggregated, n_batches_written
         if not aggregated:
             return
-        suffix = f"_b{n_batches_written:04d}" if args.batch_size > 0 else ""
-        out_pkl = out_dir / f"data_{args.tag}_{stamp}{suffix}.pkl"
+        out_pkl = out_dir / output_filename(
+            tag=args.tag,
+            stamp=stamp,
+            batch_number=n_batches_written,
+            batched=args.batch_size > 0,
+            manifest_sha256=manifest_digest,
+        )
         with open(out_pkl, "wb") as f:
             pickle.dump(aggregated, f)
         print(f"  💾 落盘 {out_pkl.name} ({len(aggregated)} 几何)", flush=True)
