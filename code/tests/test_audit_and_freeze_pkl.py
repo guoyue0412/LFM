@@ -395,16 +395,21 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         "RPM", "WIND", "ANGLE", *section_columns
     ]
     split_payload = json.loads((output / "geometry_split_synthetic-v1.json").read_text())
-    split_sets = [set(split_payload[name]) for name in ("train", "validation", "test")]
-    assert all(
-        not (split_sets[i] & split_sets[j])
-        for i in range(3)
-        for j in range(i + 1, 3)
-    )
-    assert set().union(*split_sets) == {0, 1, 2}
-    assert not ({1000, 1010} & set().union(*split_sets))
+    common_split = split_payload["common_11d_47d"]
+    full_47d_split = split_payload["full_47d"]
+    for split in (common_split, full_47d_split):
+        split_sets = [set(split[name]) for name in ("train", "validation", "test")]
+        assert all(
+            not (split_sets[i] & split_sets[j])
+            for i in range(3)
+            for j in range(i + 1, 3)
+        )
+        assert set().union(*split_sets) == set(split["eligible_geometry_ids"])
+        assert not ({1000, 1010} & set().union(*split_sets))
+    assert common_split["eligible_geometry_ids"] == [0, 1, 2]
+    assert full_47d_split["eligible_geometry_ids"] == [0, 1, 2]
     expected_train_cp0 = sorted(
-        historical_cp8[geom_id][0] for geom_id in split_payload["train"]
+        historical_cp8[geom_id][0] for geom_id in common_split["train"]
     )
     np.testing.assert_allclose(
         sorted(frozen["normalizer_inputs_11d"]["chord_cp_0"].unique()),
@@ -429,7 +434,7 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         "normalizer_inputs_47d": 42,
     }
     assert acceptance["excluded_cp8_recoveries"] == []
-    assert set(acceptance["split_ids"]) == {"train", "validation", "test"}
+    assert set(acceptance["split_ids"]) == {"common_11d_47d", "full_47d"}
     for name, artifact_digest in acceptance["artifact_sha256"].items():
         assert hashlib.sha256((output / name).read_bytes()).hexdigest() == artifact_digest
 
@@ -463,7 +468,90 @@ def test_failed_historical_cp8_recovery_is_exported_only_for_47d(tmp_path):
     assert acceptance["historical_47d_only_geometry_count"] == 1
     assert acceptance["output_row_counts"]["historical_train_47d_only__base42"] == 42
     assert frozen["normalizer_inputs_11d"].empty
-    assert frozen["normalizer_inputs_47d"].empty
+    assert len(frozen["normalizer_inputs_47d"]) == 42
+
+
+def test_representation_splits_preserve_common_assignments_and_47d_only_membership(
+    tmp_path,
+):
+    common_ids = {0, 1, 2}
+    only_47d_ids = {3, 4, 5}
+    section_signature = {}
+    cp_signature = {}
+    base_cp8 = np.array([0.018, 0.031, 0.014, 0.006, 52.0, 21.0, 16.0, 11.0])
+    for geom_id in sorted(common_ids):
+        cp8 = base_cp8.copy()
+        cp8[0] += geom_id * 1e-3
+        cp_signature[geom_id] = cp8[0]
+        section_signature[geom_id] = cp_to_sections(cp8)[0]
+        write_fake_pkl(
+            tmp_path / f"common_{geom_id}.pkl",
+            geom_id=geom_id,
+            conditions=BASE_CONDITIONS,
+            cp8=cp8,
+        )
+    for geom_id in sorted(only_47d_ids):
+        geometry = _geometry()
+        geometry[0, 1] += (geom_id + 1) * 1e-4
+        section_signature[geom_id] = geometry[0, 1]
+        node = {
+            "geometry": geometry,
+            "geom_id": geom_id,
+            **{_condition_key(condition): _frame() for condition in BASE_CONDITIONS},
+        }
+        with (tmp_path / f"only47_{geom_id}.pkl").open("wb") as handle:
+            pickle.dump({f"geometry_{geom_id}": node}, handle)
+
+    report = audit_sources(
+        [tmp_path], expected_base_ids=sorted(common_ids | only_47d_ids)
+    )
+    output = tmp_path / "frozen"
+    frozen = freeze_datasets(report, output, version="representation-v1")
+    split_payload = json.loads(
+        (output / "geometry_split_representation-v1.json").read_text()
+    )
+    acceptance = json.loads(
+        (output / "acceptance_representation-v1.json").read_text()
+    )
+
+    common = split_payload["common_11d_47d"]
+    full = split_payload["full_47d"]
+    for split, eligible in ((common, common_ids), (full, common_ids | only_47d_ids)):
+        groups = [set(split[name]) for name in ("train", "validation", "test")]
+        assert all(
+            not (groups[i] & groups[j])
+            for i in range(3)
+            for j in range(i + 1, 3)
+        )
+        assert set().union(*groups) == eligible == set(split["eligible_geometry_ids"])
+    for name in ("train", "validation", "test"):
+        assert set(common[name]) == set(full[name]) & common_ids
+    assert sum(
+        geom_id in full[name]
+        for geom_id in only_47d_ids
+        for name in ("train", "validation", "test")
+    ) == len(only_47d_ids)
+
+    expected_11d_cp0 = sorted(cp_signature[geom_id] for geom_id in common["train"])
+    np.testing.assert_allclose(
+        sorted(frozen["normalizer_inputs_11d"]["chord_cp_0"].unique()),
+        expected_11d_cp0,
+        atol=1e-12,
+        rtol=0,
+    )
+    expected_47d_sections = sorted(section_signature[geom_id] for geom_id in full["train"])
+    np.testing.assert_allclose(
+        sorted(frozen["normalizer_inputs_47d"]["chord_0"].unique()),
+        expected_47d_sections,
+        atol=1e-12,
+        rtol=0,
+    )
+    assert acceptance["eligible_geometry_ids"] == {
+        "common_11d_47d": sorted(common_ids),
+        "full_47d": sorted(common_ids | only_47d_ids),
+    }
+    assert acceptance["historical_47d_only_geometry_ids"] == sorted(only_47d_ids)
+    assert acceptance["historical_47d_only_geometry_count"] == len(only_47d_ids)
 
 
 def test_stale_manifest_metadata_is_preserved_and_explicitly_excluded(tmp_path):

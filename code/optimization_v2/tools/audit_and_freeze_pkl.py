@@ -769,6 +769,37 @@ def geometry_grouped_split(
     }
 
 
+def representation_splits(
+    common_ids: Iterable[int], only_47d_ids: Iterable[int], seed: int = SEED
+) -> dict[str, dict]:
+    """Build common/full splits without changing any common-ID assignment."""
+    common_eligible = sorted({int(value) for value in common_ids})
+    only_47d_eligible = sorted({int(value) for value in only_47d_ids})
+    if set(common_eligible) & set(only_47d_eligible):
+        raise ValueError("common and 47D-only geometry IDs must be disjoint")
+    common = geometry_grouped_split(common_eligible, seed=seed)
+    additional = geometry_grouped_split(only_47d_eligible, seed=seed)
+    full = {
+        name: sorted(common[name] + additional[name])
+        for name in ("train", "validation", "test")
+    }
+    return {
+        "common_11d_47d": {
+            "eligible_geometry_ids": common_eligible,
+            **common,
+        },
+        "full_47d": {
+            "eligible_geometry_ids": sorted(common_eligible + only_47d_eligible),
+            **full,
+        },
+        "relationship": {
+            "common_assignments_preserved": True,
+            "additional_47d_only_geometry_ids": only_47d_eligible,
+            "additional_assignment": "independent_seeded_geometry_split",
+        },
+    }
+
+
 def _record_row(record: AuditRecord, *, include_cp8: bool = True) -> dict:
     if record.sections is None or (include_cp8 and record.cp8 is None):
         raise ValueError("record lacks the geometry representation required for export")
@@ -846,8 +877,15 @@ def freeze_datasets(
 
     training_records = report.training_records()
     historical_47d_only = report.historical_47d_only_records()
-    complete_ids = sorted({record.geom_id for record in training_records})
-    split_ids = geometry_grouped_split(complete_ids, seed=seed)
+    common_ids = sorted({record.geom_id for record in training_records})
+    historical_47d_only_ids = sorted(
+        {record.geom_id for record in historical_47d_only}
+    )
+    split_payload = representation_splits(
+        common_ids, historical_47d_only_ids, seed=seed
+    )
+    common_split_ids = split_payload["common_11d_47d"]
+    full_47d_split_ids = split_payload["full_47d"]
     partition_records: dict[str, list[AuditRecord]] = {
         name: [] for name in PARTITION_NAMES
     }
@@ -888,14 +926,22 @@ def freeze_datasets(
         raise RuntimeError("a supplement key cannot be both exported and excluded")
     if exported_supplement_keys | excluded_supplement_keys != supplement_keys:
         raise RuntimeError("every selected supplement key must be exported or excluded")
-    train_id_set = set(split_ids["train"])
-    normalizer_records = [
-        record for record in training_records if record.geom_id in train_id_set
+    common_train_ids = set(common_split_ids["train"])
+    full_47d_train_ids = set(full_47d_split_ids["train"])
+    normalizer_11d_records = [
+        record for record in training_records if record.geom_id in common_train_ids
+    ]
+    normalizer_47d_records = [
+        record
+        for record in [*training_records, *historical_47d_only]
+        if record.geom_id in full_47d_train_ids
     ]
     normalizer_11d_columns = ["RPM", "WIND", "ANGLE", *CP_COLUMNS]
     normalizer_47d_columns = ["RPM", "WIND", "ANGLE", *SECTION_COLUMNS]
-    normalizer_inputs_11d = _frame(normalizer_records)[normalizer_11d_columns]
-    normalizer_inputs_47d = _frame(normalizer_records)[normalizer_47d_columns]
+    normalizer_inputs_11d = _frame(normalizer_11d_records)[normalizer_11d_columns]
+    normalizer_inputs_47d = _frame(
+        normalizer_47d_records, include_cp8=False
+    )[normalizer_47d_columns]
 
     artifacts: list[Path] = []
     for name, frame in partitions.items():
@@ -910,7 +956,7 @@ def freeze_datasets(
     artifacts.append(normalizer_47d_path)
 
     split_path = output_dir / f"geometry_split_{version}.json"
-    _write_json(split_path, {"seed": seed, **split_ids})
+    _write_json(split_path, {"seed": seed, **split_payload})
     artifacts.append(split_path)
 
     coverage_payload = {
@@ -958,9 +1004,21 @@ def freeze_datasets(
         "normalizer_inputs_11d": len(normalizer_inputs_11d),
         "normalizer_inputs_47d": len(normalizer_inputs_47d),
     }
-    historical_47d_only_ids = sorted(
-        {record.geom_id for record in historical_47d_only}
-    )
+    split_ids = {
+        representation: {
+            name: split_payload[representation][name]
+            for name in ("train", "validation", "test")
+        }
+        for representation in ("common_11d_47d", "full_47d")
+    }
+    eligible_geometry_ids = {
+        representation: split_payload[representation]["eligible_geometry_ids"]
+        for representation in ("common_11d_47d", "full_47d")
+    }
+    historical_47d_only_split_ids = {
+        name: sorted(set(full_47d_split_ids[name]) & set(historical_47d_only_ids))
+        for name in ("train", "validation", "test")
+    }
     acceptance = {
         "version": version,
         "seed": seed,
@@ -983,6 +1041,21 @@ def freeze_datasets(
         "metadata_errors": report.metadata_errors,
         "historical_47d_only_geometry_ids": historical_47d_only_ids,
         "historical_47d_only_geometry_count": len(historical_47d_only_ids),
+        "historical_47d_only_split_ids": historical_47d_only_split_ids,
+        "eligible_geometry_ids": eligible_geometry_ids,
+        "representation_eligibility": {
+            "common_11d_47d": {
+                "eligible_geometry_ids": common_ids,
+                "47d_only_geometry_ids": [],
+                "47d_only_geometry_count": 0,
+            },
+            "full_47d": {
+                "eligible_geometry_ids": eligible_geometry_ids["full_47d"],
+                "47d_only_geometry_ids": historical_47d_only_ids,
+                "47d_only_geometry_count": len(historical_47d_only_ids),
+            },
+        },
+        "split_relationship": split_payload["relationship"],
         "supplement_selected_key_count": len(supplement_keys),
         "supplement_exported_key_count": len(exported_supplement_keys),
         "supplement_excluded_key_count": len(excluded_supplement_keys),
