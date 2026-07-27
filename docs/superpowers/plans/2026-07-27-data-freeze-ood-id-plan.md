@@ -291,11 +291,26 @@ def test_audit_reports_missing_and_duplicate_keys(tmp_path):
 
 Normalize `geometry_<id>` and stored `geom_id`; reject disagreements. Parse numeric condition keys into exact `(int, float, float)` tuples, record unreadable pkl files, and retain source filename plus mtime for deterministic duplicate decisions.
 
-- [ ] **Step 3: Define deterministic duplicate resolution and test it**
+- [ ] **Step 3: Write and implement explicit QBlade sign-convention tests**
+
+The QBlade wrapper stores both raw time-series columns and post-processed UAV-positive aliases. Require `THRUST`, `THRUST_Z`, `MY`, and `TORQUE` when they are present; these aliases equal `-mean(Thrust)`, `-mean(Thrust_z)`, `-mean(My)`, and `-mean(Torque)` in the pinned wrapper. Never prefer raw `Thrust`, `Thrust_z`, `My`, or `Torque` merely because they appear first in a candidate list. For legacy frames that contain raw columns only, apply the same explicit sign conversion and record `output_sign_source=legacy_raw_converted`.
+
+```python
+def test_aggregate_prefers_uav_positive_qblade_aliases():
+    frame = fake_qblade_frame_with_raw_and_postprocessed_columns()
+    out, provenance = aggregate_timeseries(frame, last_n=120)
+    assert out == pytest.approx({"T": frame.THRUST.iloc[-1],
+                                 "H": frame.THRUST_Z.iloc[-1],
+                                 "My": frame.MY.iloc[-1],
+                                 "Q": frame.TORQUE.iloc[-1]})
+    assert provenance == "qblade_uav_positive_aliases"
+```
+
+- [ ] **Step 4: Define deterministic duplicate resolution and test it**
 
 Resolution order is: valid finite outputs over invalid; explicit stored `geom_id` over filename inference; manifest SHA match over mismatch; newer generator Git metadata over missing metadata; otherwise newest mtime. Every discarded row is written to the duplicate decision log.
 
-- [ ] **Step 4: Extend conversion records with provenance**
+- [ ] **Step 5: Extend conversion records with provenance**
 
 ```python
 row.update({
@@ -305,13 +320,14 @@ row.update({
     **{f"chord_cp_{i}": cp8[i] for i in range(4)},
     **{f"twist_cp_{i}": cp8[i + 4] for i in range(4)},
     "manifest_sha256": geo_val.get("manifest_sha256", ""),
+    "output_sign_source": output_sign_source,
     "source_file": fpath.name,
 })
 ```
 
 Historical rows use recovered cp8 only when reconstruction passes `1e-10`; failures remain in the audit but are excluded from the 11D dataset.
 
-- [ ] **Step 5: Write and implement leakage-free export tests**
+- [ ] **Step 6: Write and implement leakage-free export tests**
 
 ```python
 def test_freeze_exports_are_key_disjoint(frozen):
@@ -322,15 +338,15 @@ def test_freeze_exports_are_key_disjoint(frozen):
     assert set(frozen["train"]["ANGLE"]) <= {82, 83, 84, 85, 86, 87, 88}
 ```
 
-- [ ] **Step 6: Implement geometry-grouped split manifests**
+- [ ] **Step 7: Implement geometry-grouped split manifests**
 
 Use seed `20260727`; split only historical complete base-grid geometry IDs, never rows. Save exact train/validation/test geometry ID arrays. New geometry ID, geometry OOD, and condition OOD records remain external evaluation sets.
 
-- [ ] **Step 7: Emit checksums and acceptance report**
+- [ ] **Step 8: Emit checksums and acceptance report**
 
 The acceptance JSON contains input paths, Git commits, manifest digest, pkl counts, unique geometry IDs, per-geometry coverage, duplicates, missing keys, excluded cp8 recoveries, output row counts, split IDs, and SHA-256 for every CSV/JSON artifact.
 
-- [ ] **Step 8: Run Task 3 tests and commit**
+- [ ] **Step 9: Run Task 3 tests and commit**
 
 Run: `PYTHONPATH=code /Users/guoyue/anaconda3/bin/python -m pytest code/tests/test_audit_and_freeze_pkl.py -v`
 
@@ -427,4 +443,3 @@ The report links each row count and coverage conclusion to an acceptance JSON/CS
 - [ ] **Step 6: Create the next implementation plan only after acceptance**
 
 Write `docs/superpowers/plans/<date>-four-model-retrain-and-sweep-plan.md` with the frozen version, exact geometry counts, grouped split IDs, four 1500-epoch model configurations, result directories, and final-test one-shot rule.
-
