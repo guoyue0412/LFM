@@ -78,6 +78,8 @@ def recover_cp8(sections: np.ndarray, tolerance: float = 1e-10) -> CpRecovery:
     expected_shape = (2 * N_SECTIONS,)
     if sections.shape != expected_shape:
         raise ValueError(f"expected {expected_shape[0]} sections, got {sections.shape}")
+    if not np.all(np.isfinite(sections)):
+        raise ValueError("non-finite sections")
 
     chord_basis = _basis_matrix(CHORD_KNOTS)
     twist_basis = _basis_matrix(TWIST_KNOTS)
@@ -88,7 +90,14 @@ def recover_cp8(sections: np.ndarray, tolerance: float = 1e-10) -> CpRecovery:
             np.linalg.lstsq(twist_basis, twist_sections, rcond=None)[0],
         ]
     )
-    max_abs_error = float(np.max(np.abs(cp_to_sections(cp8) - sections)))
+    if not np.all(np.isfinite(cp8)):
+        raise ValueError("non-finite recovered cp8")
+    rebuilt = cp_to_sections(cp8)
+    if not np.all(np.isfinite(rebuilt)):
+        raise ValueError("non-finite rebuilt sections")
+    max_abs_error = float(np.max(np.abs(rebuilt - sections)))
+    if not np.isfinite(max_abs_error):
+        raise ValueError("non-finite reconstruction error")
     if max_abs_error > tolerance:
         raise ValueError(
             f"reconstruction error {max_abs_error:.6e} exceeds {tolerance:.6e}"
