@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 LFM_ROOT = Path(__file__).resolve().parent.parent
 if str(LFM_ROOT) not in sys.path:
@@ -61,6 +62,11 @@ SUB_LIB_ROOT = SUBMODULE_ROOT / "QBladeCE_2.0.8.6"
 CONDITION_SPLITS = frozenset(
     {"base42", "condition_id_interp", "condition_ood_alpha1"}
 )
+EXPECTED_SPLIT_COUNTS = {
+    "base42": 42,
+    "condition_id_interp": 15,
+    "condition_ood_alpha1": 6,
+}
 GEOMETRY_CATEGORIES = frozenset({"geometry_id", "geometry_ood"})
 
 
@@ -173,8 +179,6 @@ def build_manifest_tasks(
     tasks = []
     for record in records:
         geom_id = record["geom_id"]
-        if geom_ids is not None and geom_id not in geom_ids:
-            continue
         geometry_category = record.get("category")
         if geometry_category not in GEOMETRY_CATEGORIES:
             raise ValueError(
@@ -191,6 +195,7 @@ def build_manifest_tasks(
             raise ValueError(f"geometry {geom_id}: conditions must be a non-empty list")
         conditions_list = []
         seen_condition_keys: set[tuple[float, float, float]] = set()
+        seen_serialized_keys: set[str] = set()
         for index, condition in enumerate(declared_conditions):
             if not isinstance(condition, dict):
                 raise ValueError(f"geometry {geom_id}: condition {index} must be an object")
@@ -208,9 +213,22 @@ def build_manifest_tasks(
             key = (rpm, wind, angle)
             if key in seen_condition_keys:
                 raise ValueError(f"geometry {geom_id}: duplicate condition key {key}")
+            serialized_key = condition_key(rpm, wind, angle)
+            if serialized_key in seen_serialized_keys:
+                raise ValueError(
+                    f"geometry {geom_id}: duplicate serialized condition key "
+                    f"{serialized_key!r}"
+                )
             seen_condition_keys.add(key)
+            seen_serialized_keys.add(serialized_key)
             conditions_list.append((rpm, wind, angle, split))
         conditions = tuple(conditions_list)
+        split_counts = Counter(split for _, _, _, split in conditions)
+        if dict(split_counts) != EXPECTED_SPLIT_COUNTS:
+            raise ValueError(
+                f"geometry {geom_id}: condition split counts must be "
+                f"{EXPECTED_SPLIT_COUNTS}, got {dict(split_counts)}"
+            )
         seed = record.get("seed")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError(f"geometry {geom_id}: seed must be an integer")
@@ -225,7 +243,9 @@ def build_manifest_tasks(
                 manifest_sha256=manifest.sha256,
             )
         )
-    return tasks
+    if geom_ids is None:
+        return tasks
+    return [task for task in tasks if task.geom_id in geom_ids]
 
 
 def parse_geom_ids(value: str | None) -> set[int] | None:
@@ -258,6 +278,7 @@ def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
         geometry = np.asarray(node["geometry"], dtype=np.float64)
     except (KeyError, TypeError, ValueError):
         return False
+    generator_commit = node.get("generator_git_commit")
     return (
         node.get("geom_id") == task.geom_id
         and node.get("manifest_sha256") == task.manifest_sha256
@@ -265,6 +286,9 @@ def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
         and node.get("seed") == task.seed
         and node.get("condition_split") == expected_splits
         and condition_keys == set(expected_splits)
+        and isinstance(generator_commit, str)
+        and bool(generator_commit.strip())
+        and all(_is_nonempty_condition_frame(node.get(key)) for key in expected_splits)
         and np.array_equal(control_points, task.cp8)
         and np.array_equal(geometry, task.geometry)
     )
@@ -432,9 +456,22 @@ def worker_init(worktree_root: str, omp_threads: int) -> None:
     print(f"[worker {os.getpid()}] ready, cwd={os.getcwd()}", flush=True)
 
 
+def _format_condition_number(value: float) -> str:
+    """Use Python's shortest lossless binary64 round-trip representation."""
+    return repr(float(value))
+
+
 def condition_key(rpm: float, wind: float, angle: float) -> str:
     """Return the stable legacy-compatible key for one declared condition."""
-    return f"RPM{rpm:g}_Wind{wind:g}_Angle{angle:g}"
+    return (
+        f"RPM{_format_condition_number(rpm)}_"
+        f"Wind{_format_condition_number(wind)}_"
+        f"Angle{_format_condition_number(angle)}"
+    )
+
+
+def _is_nonempty_condition_frame(value: object) -> bool:
+    return isinstance(value, pd.DataFrame) and not value.empty
 
 
 def _generator_git_commit() -> str:
@@ -465,10 +502,15 @@ def _worker_run_manifest(
         condition_results = {}
         split_map = {}
         for rpm, wind, angle, split in manifest_task.conditions:
-            frame = sim.run_one_simulation(RPM=rpm, WIND_SPEED=wind, ANGLE=angle)
-            if frame is None or getattr(frame, "empty", False):
-                raise RuntimeError(f"empty QBlade result for {(rpm, wind, angle)}")
             key = condition_key(rpm, wind, angle)
+            sim.run_one_simulation(RPM=rpm, WIND_SPEED=wind, ANGLE=angle)
+            if key not in sim.all_simulation_data:
+                raise RuntimeError(
+                    f"absent persisted QBlade result for {(rpm, wind, angle)}"
+                )
+            frame = sim.all_simulation_data[key]
+            if not _is_nonempty_condition_frame(frame):
+                raise RuntimeError(f"empty QBlade result for {(rpm, wind, angle)}")
             condition_results[key] = frame
             split_map[key] = split
 
@@ -497,7 +539,14 @@ def _worker_run_manifest(
     finally:
         close = getattr(sim, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception as close_error:
+                print(
+                    f"[warn] worker {pid} geom {manifest_task.geom_id} close failed: "
+                    f"{type(close_error).__name__}: {close_error}",
+                    flush=True,
+                )
 
 
 def worker_run(task: tuple) -> tuple:

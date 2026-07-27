@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from optimization_v2.geometry import GEOMETRY_R, cp_to_sections
@@ -135,14 +136,43 @@ def test_manifest_subset_rejects_absent_exact_id(tmp_path):
         runner.build_manifest_tasks(manifest, geom_ids={1001})
 
 
-class FakeFrame:
-    def __init__(self, empty=False):
-        self.empty = empty
+def test_manifest_subset_still_validates_unselected_records(tmp_path):
+    payload = _manifest_payload((1000, 1001))
+    payload["geometries"][1]["sections"][0] += 1e-9
+    manifest = runner.load_manifest(_write_manifest(tmp_path, payload))
+
+    with pytest.raises(ValueError, match="geometry 1001.*cp8-section mismatch"):
+        runner.build_manifest_tasks(manifest, geom_ids={1000})
+
+
+def test_manifest_requires_exact_condition_split_counts(tmp_path):
+    payload = _manifest_payload()
+    payload["geometries"][0]["conditions"].pop()
+    manifest = runner.load_manifest(_write_manifest(tmp_path, payload))
+
+    with pytest.raises(ValueError, match="condition split counts"):
+        runner.build_manifest_tasks(manifest)
+
+
+def test_condition_keys_losslessly_distinguish_close_floats(tmp_path):
+    payload = _manifest_payload()
+    first, second = payload["geometries"][0]["conditions"][:2]
+    first["rpm"] = 4000.000001
+    second["rpm"] = 4000.000002
+    second["angle"] = first["angle"]
+    manifest = runner.load_manifest(_write_manifest(tmp_path, payload))
+
+    task = runner.build_manifest_tasks(manifest)[0]
+    keys = [runner.condition_key(*condition[:3]) for condition in task.conditions]
+
+    assert len(keys) == len(set(keys)) == 63
+    assert keys[0] != keys[1]
 
 
 class FakeSimulation:
     instances = []
     empty_condition = None
+    omit_persisted_condition = None
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -161,7 +191,14 @@ class FakeSimulation:
     def run_one_simulation(self, RPM, WIND_SPEED, ANGLE):
         condition = (RPM, WIND_SPEED, ANGLE)
         self.calls.append(condition)
-        return FakeFrame(empty=condition == self.empty_condition)
+        frame = (
+            pd.DataFrame()
+            if condition == self.empty_condition
+            else pd.DataFrame({"value": [RPM + WIND_SPEED + ANGLE]})
+        )
+        if condition != self.omit_persisted_condition:
+            self.all_simulation_data[runner.condition_key(*condition)] = frame
+        return frame
 
     def close(self):
         self.closed = True
@@ -182,6 +219,7 @@ def manifest_task(tmp_path):
 def test_worker_runs_only_declared_conditions_and_stores_metadata(monkeypatch, manifest_task):
     FakeSimulation.instances.clear()
     FakeSimulation.empty_condition = None
+    FakeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
 
@@ -214,6 +252,7 @@ def test_worker_runs_only_declared_conditions_and_stores_metadata(monkeypatch, m
 def test_worker_rejects_empty_declared_condition(monkeypatch, manifest_task):
     FakeSimulation.instances.clear()
     FakeSimulation.empty_condition = manifest_task.conditions[0][:3]
+    FakeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
 
@@ -225,6 +264,63 @@ def test_worker_rejects_empty_declared_condition(monkeypatch, manifest_task):
     assert FakeSimulation.instances[-1].closed
 
 
+class NoneReturningSimulation(FakeSimulation):
+    def run_one_simulation(self, RPM, WIND_SPEED, ANGLE):
+        super().run_one_simulation(RPM, WIND_SPEED, ANGLE)
+        return None
+
+
+def test_worker_uses_persisted_mapping_when_run_returns_none(monkeypatch, manifest_task):
+    NoneReturningSimulation.instances.clear()
+    NoneReturningSimulation.empty_condition = None
+    NoneReturningSimulation.omit_persisted_condition = None
+    monkeypatch.setattr(runner, "_SIMULATION", NoneReturningSimulation, raising=False)
+    monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+
+    geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
+
+    assert error is None and geom_id == manifest_task.geom_id
+    simulation = NoneReturningSimulation.instances[-1]
+    for rpm, wind, angle, _ in manifest_task.conditions:
+        key = runner.condition_key(rpm, wind, angle)
+        assert result[key] is simulation.all_simulation_data[key]
+
+
+def test_worker_rejects_returned_frame_absent_from_persisted_mapping(
+    monkeypatch, manifest_task
+):
+    FakeSimulation.instances.clear()
+    FakeSimulation.empty_condition = None
+    FakeSimulation.omit_persisted_condition = manifest_task.conditions[0][:3]
+    monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
+    monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+
+    geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
+
+    assert geom_id == manifest_task.geom_id and result is None
+    assert "absent persisted QBlade result" in error
+
+
+class CloseFailingSimulation(FakeSimulation):
+    def close(self):
+        self.closed = True
+        raise RuntimeError("close failed")
+
+
+def test_worker_close_error_does_not_override_success(monkeypatch, manifest_task):
+    CloseFailingSimulation.instances.clear()
+    CloseFailingSimulation.empty_condition = None
+    CloseFailingSimulation.omit_persisted_condition = None
+    monkeypatch.setattr(runner, "_SIMULATION", CloseFailingSimulation, raising=False)
+    monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+
+    geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
+
+    assert error is None and geom_id == manifest_task.geom_id
+    assert result is not None
+    assert CloseFailingSimulation.instances[-1].closed
+
+
 def _stored_result(task):
     condition_split = {
         runner.condition_key(rpm, wind, angle): split
@@ -232,7 +328,7 @@ def _stored_result(task):
     }
     return {
         "geometry": task.geometry,
-        **{key: object() for key in condition_split},
+        **{key: pd.DataFrame({"value": [1.0]}) for key in condition_split},
         "geom_id": task.geom_id,
         "category": task.category,
         "control_points": task.cp8.tolist(),
@@ -253,11 +349,35 @@ def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
     stored["geometry_1002"]["manifest_sha256"] = "f" * 64
     missing_key = runner.condition_key(*tasks[3].conditions[0][:3])
     stored["geometry_1003"].pop(missing_key)
-    stored["geometry_1004"]["RPM9999_Wind10_Angle90"] = object()
+    stored["geometry_1004"]["RPM9999.0_Wind10.0_Angle90.0"] = pd.DataFrame(
+        {"value": [1.0]}
+    )
     with (tmp_path / "prior.pkl").open("wb") as handle:
         pickle.dump(stored, handle)
 
     assert runner.find_completed_manifest_ids(tmp_path, tasks) == {1000}
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda node, key: node.__setitem__(key, None),
+        lambda node, key: node.__setitem__(key, pd.DataFrame()),
+        lambda node, key: node.__setitem__(key, {"not": "a dataframe"}),
+        lambda node, key: node.__setitem__("generator_git_commit", ""),
+        lambda node, key: node.pop("generator_git_commit"),
+    ],
+)
+def test_resume_rejects_invalid_condition_payload_or_commit(tmp_path, corrupt):
+    manifest = runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    task = runner.build_manifest_tasks(manifest)[0]
+    node = _stored_result(task)
+    first_key = runner.condition_key(*task.conditions[0][:3])
+    corrupt(node, first_key)
+    with (tmp_path / "corrupt.pkl").open("wb") as handle:
+        pickle.dump({f"geometry_{task.geom_id}": node}, handle)
+
+    assert runner.find_completed_manifest_ids(tmp_path, [task]) == set()
 
 
 def test_manifest_cli_arguments_and_exact_id_parser(monkeypatch):
