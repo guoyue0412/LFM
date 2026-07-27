@@ -20,15 +20,13 @@
     [RPM, WIND, ANGLE, chord_0..21, twist_0..21, T, H, My, Q,
      geom_idx, source_file]
 
-聚合策略: 末段 N 步均值 (默认 last 120, 与 V2 一致)
-列重命名:  Fx → T, Fz → H, Torque → Q (My 保留)
+聚合策略: 优先使用 pinned QBlade wrapper 写入的 UAV-positive aliases；
+          仅有 raw QBlade 列时，对末段 N 步均值显式取负。
 """
 
 import argparse
-import os
 import pickle
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -44,37 +42,59 @@ SECTION_COLS = CHORD_COLS + TWIST_COLS
 CONDITION_COLS = ["RPM", "WIND", "ANGLE"]
 OUTPUT_COLS = ["T", "H", "My", "Q"]
 
-# 原始 QBlade DataFrame 列名 → V2 输出列名 (按优先级匹配)
-# 新版 SIMULATION 落盘的 1000-step 末段 DataFrame 含:
-#   Thrust / Thrust_y / Thrust_z / Torque / My / Mz / Mx
-# 旧版 raw_data.csv 用 Fx / Fy / Fz / Torque / My / Mz
-# 我们在每个 candidate 列表中按顺序尝试,取第一个存在的。
-OUTPUT_SPEC = {
-    "T":  ["Thrust", "THRUST", "Fx", "FX"],           # 轴向推力
-    "H":  ["Thrust_z", "THRUST_Z", "Fz", "FZ"],       # 侧向/面内力
-    "My": ["My", "MY"],                                # 俯仰力矩
-    "Q":  ["Torque", "TORQUE", "Q"],                   # 扭矩
+QBlade_ALIAS_SPEC = {
+    "T": "THRUST",
+    "H": "THRUST_Z",
+    "My": "MY",
+    "Q": "TORQUE",
+}
+QBlade_RAW_SPEC = {
+    "T": "Thrust",
+    "H": "Thrust_z",
+    "My": "My",
+    "Q": "Torque",
 }
 
 
-def _aggregate_timeseries(df: pd.DataFrame, last_n: int) -> dict:
-    """从时序 DataFrame 提取稳态输出 (末段均值)。
+def aggregate_timeseries(df: pd.DataFrame, last_n: int) -> tuple[dict, str]:
+    """Extract four UAV-positive outputs without mixing sign conventions.
 
-    DataFrame 通常是 SIMULATION 已截取的末 120 步,这里再取 last_n 兜底。
+    The pinned wrapper persists all four upper-case aliases after applying the
+    UAV-positive sign convention.  If any alias is present, all four are
+    required.  Legacy frames containing only the four raw QBlade columns are
+    converted using the wrapper's exact ``-mean(raw)`` rule.
     """
-    if len(df) == 0:
-        return {}
+    if not isinstance(df, pd.DataFrame) or len(df) == 0 or last_n <= 0:
+        return {}, "invalid_timeseries"
     tail = df.iloc[-last_n:] if len(df) >= last_n else df
-    out = {}
-    for target, candidates in OUTPUT_SPEC.items():
-        col = next((c for c in candidates if c in df.columns), None)
-        if col is None:
-            return {}  # 缺关键列 → 整条样本作废
-        v = tail[col].mean()
-        if not np.isfinite(v):
-            return {}
-        out[target] = float(v)
-    return out
+    alias_columns = set(QBlade_ALIAS_SPEC.values())
+    present_aliases = alias_columns.intersection(df.columns)
+    if present_aliases:
+        if present_aliases != alias_columns:
+            return {}, "invalid_partial_qblade_aliases"
+        out = {
+            target: float(pd.to_numeric(tail[column], errors="coerce").iloc[-1])
+            for target, column in QBlade_ALIAS_SPEC.items()
+        }
+        if not all(np.isfinite(value) for value in out.values()):
+            return {}, "invalid_qblade_uav_positive_aliases"
+        return out, "qblade_uav_positive_aliases"
+
+    raw_columns = set(QBlade_RAW_SPEC.values())
+    if not raw_columns.issubset(df.columns):
+        return {}, "invalid_missing_output_columns"
+    out = {
+        target: -float(pd.to_numeric(tail[column], errors="coerce").mean())
+        for target, column in QBlade_RAW_SPEC.items()
+    }
+    if not all(np.isfinite(value) for value in out.values()):
+        return {}, "invalid_legacy_raw_outputs"
+    return out, "legacy_raw_converted"
+
+
+def _aggregate_timeseries(df: pd.DataFrame, last_n: int) -> dict:
+    """Backward-compatible value-only wrapper used by older callers."""
+    return aggregate_timeseries(df, last_n)[0]
 
 
 def _split_geometry(geometry: np.ndarray) -> dict:
@@ -157,14 +177,17 @@ def convert_directory(src_dir: Path, last_n: int, verbose: bool) -> pd.DataFrame
                     skipped.append({"file": fpath.name, "case": case_key, "reason": "非 DataFrame"})
                     continue
                 rpm, wind, angle = [float(x) for x in m.groups()]
-                out_cols = _aggregate_timeseries(case_df, last_n)
+                out_cols, output_sign_source = aggregate_timeseries(case_df, last_n)
                 if not out_cols:
                     skipped.append({"file": fpath.name, "case": case_key, "reason": "时序无效/缺列"})
                     continue
                 row = {
                     "RPM": rpm, "WIND": wind, "ANGLE": angle,
                     **geom_cols, **out_cols,
-                    "geom_idx": geom_idx, "source_file": fpath.name,
+                    "geom_idx": geom_idx,
+                    "geom_id": geom_idx,
+                    "output_sign_source": output_sign_source,
+                    "source_file": fpath.name,
                 }
                 records.append(row)
                 cases_added += 1
@@ -177,7 +200,9 @@ def convert_directory(src_dir: Path, last_n: int, verbose: bool) -> pd.DataFrame
 
     df = pd.DataFrame(records)
     # 强制列顺序
-    fixed = CONDITION_COLS + SECTION_COLS + OUTPUT_COLS + ["geom_idx", "source_file"]
+    fixed = CONDITION_COLS + SECTION_COLS + OUTPUT_COLS + [
+        "geom_idx", "geom_id", "output_sign_source", "source_file"
+    ]
     df = df[fixed]
 
     if verbose:
