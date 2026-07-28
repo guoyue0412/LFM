@@ -374,7 +374,7 @@ Expected: exact remote commit and dirty state are recorded; no active generator 
 
 - [ ] **Step 2: Push the reviewed branch and fast-forward or clone it into a separate remote run directory**
 
-Do not overwrite the existing dirty remote checkout. Use a versioned run checkout such as `/home/gy/gy_2026/graduation/runs/LFM_datafreeze_20260727_<commit7>` and initialize the pinned submodule.
+Do not overwrite the existing dirty remote checkout. Use a versioned run checkout such as `/home/gy/gy_2026/graduation/runs/LFM_datafreeze_20260727_<commit7>` and initialize the pinned submodule. Select the QBlade compatibility commit from the live remote generation environment and record the evidence/uncertainty for legacy pkl that lack embedded commit metadata. The superproject gitlink must match that selected commit; record and validate both full commit hashes in every new manifest result. A runtime submodule HEAD that differs from the superproject gitlink is a hard failure.
 
 - [ ] **Step 3: Generate the manifest against the latest audited historical CSV**
 
@@ -382,7 +382,7 @@ Run the Task 1 CLI with seed `20260727`, save the JSON and SHA-256 in the versio
 
 - [ ] **Step 4: Run the six-condition alpha=1 physics preflight**
 
-Use one baseline geometry and only the six `ANGLE=89` conditions. Save raw QBlade mean values before sign conversion and converted `T,H,My,Q`. Acceptance requires finite nonzero outputs, monotonic/continuous RPM trends without sign discontinuity, and explicit force-balance tables under both fuselage-drag assumptions.
+Use one baseline geometry and only the six `ANGLE=89` conditions. The runner must first validate the original complete 63-condition manifest and its digest, then apply an explicit `condition_ood_alpha1` execution filter; do not create a weakened six-condition manifest. Save raw QBlade mean values before sign conversion and converted `T,H,My,Q`. Acceptance requires finite nonzero outputs, monotonic/continuous RPM trends without sign discontinuity, and explicit force-balance tables under both fuselage-drag assumptions. Because the pinned wrapper stores `H=THRUST_Z` as a signed UAV-axis component and the audited historical values are negative, compare the current `-H cos(alpha), +H sin(alpha)` equations against direct signed-vector rotation `+H cos(alpha), -H sin(alpha)`; do not run trim or CMA-ES until this coordinate check is resolved.
 
 - [ ] **Step 5: Apply official Iris parameters in the preflight branch and compare drag models**
 
@@ -390,7 +390,7 @@ The report must compare `l=0.13`, `d=0.023` with the previous code values and co
 
 - [ ] **Step 6: Run one ID and one geometry-OOD metadata smoke condition**
 
-Run one declared base condition for geom IDs 1000 and 1010. Reload the resulting pkl and verify exact cp8, geometry, category, condition key, manifest digest, and generator commit.
+Run one explicitly selected declared base key for geom IDs 1000 and 1010. As in Step 4, validate every full manifest record before applying the exact-key execution filter. Reload the resulting pkl and verify exact cp8, geometry, category, condition key, manifest digest, superproject commit, and QBlade submodule commit.
 
 - [ ] **Step 7: Generate exact missing-condition manifests for geom 0 and 999**
 
