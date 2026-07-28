@@ -398,7 +398,9 @@ Audit the remote raw pkl first. Derive missing keys from stored `geom_id` and pa
 
 - [ ] **Step 8: Launch the accepted batch with resumable versioned outputs**
 
-Run the repair manifest and new-geometry manifest into separate directories. Use CPU QBlade, worker/OMP settings derived from the live core count, per-geometry or small-batch pkl writes, and `nohup` logs containing the manifest digest and commit.
+Before the formal launch, extend manifest mode with crash-safe condition-level checkpoints. After every successful declared condition, atomically write one pkl node carrying the exact `geom_id`, `cp8`, 22-section geometry, geometry category, condition split, manifest SHA-256, and generator commit. Resume must validate metadata, union valid condition keys across checkpoint and aggregate pkl files, and schedule only missing keys; it must not require one monolithic 63-condition geometry node. Tests must cover interruption after a proper subset, exact-key resume, corrupt or mismatched checkpoint rejection, and completion assembled from multiple files.
+
+Run the repair manifest and new-geometry manifest into separate directories. Use CPU QBlade, worker/OMP settings derived from the live core count, per-condition atomic checkpoint writes plus small-batch aggregate pkl writes, and `nohup` logs containing the manifest digest and commit.
 
 - [ ] **Step 9: Monitor until all declared keys finish**
 
