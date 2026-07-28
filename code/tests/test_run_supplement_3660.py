@@ -107,7 +107,7 @@ def test_supplement_launcher_has_valid_shell_syntax_and_no_training_entrypoint()
     assert "train.py" not in source
     assert "sweep_moe" not in source
     assert 'WORKERS="${WORKERS:-1}"' in source
-    assert 'OMP_THREADS="${OMP_THREADS:-8}"' in source
+    assert 'OMP_THREADS="${OMP_THREADS:-4}"' in source
 
 
 @pytest.mark.parametrize(
