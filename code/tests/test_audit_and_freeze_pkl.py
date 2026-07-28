@@ -21,6 +21,8 @@ BASE_CONDITIONS = [
     for rpm in (4000, 4500, 5000, 5500, 6000, 6500)
     for angle in (82.0, 83.0, 84.0, 85.0, 86.0, 87.0, 88.0)
 ]
+VALID_GENERATOR_SHA = "a" * 40
+VALID_SUBMODULE_SHA = "b" * 40
 
 
 def _condition_key(condition):
@@ -64,6 +66,7 @@ def write_fake_pkl(
     category="historical_train",
     manifest_sha256="",
     generator_git_commit="",
+    generator_submodule_commit="",
     condition_split=None,
     cp8=None,
 ):
@@ -73,6 +76,7 @@ def write_fake_pkl(
         "category": category,
         "manifest_sha256": manifest_sha256,
         "generator_git_commit": generator_git_commit,
+        "generator_submodule_commit": generator_submodule_commit,
     }
     if stored_geom_id:
         node["geom_id"] = geom_id
@@ -316,7 +320,8 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
             conditions=[(4000, 10, 82), (4250, 10, 82.5), (4000, 10, 89)],
             category=category,
             manifest_sha256=digest,
-            generator_git_commit="abc123",
+            generator_git_commit=VALID_GENERATOR_SHA,
+            generator_submodule_commit=VALID_SUBMODULE_SHA,
             condition_split=split_map,
             cp8=cp8,
         )
@@ -331,7 +336,11 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         output,
         version="synthetic-v1",
         input_paths={"historical": historical, "supplement": supplement},
-        git_commits={"generator": "abc123", "freezer": "def456"},
+        git_commits={
+            "generator": VALID_GENERATOR_SHA,
+            "generator_submodule": VALID_SUBMODULE_SHA,
+            "freezer": "def456",
+        },
     )
 
     key_cols = ["geom_id", "RPM", "WIND", "ANGLE"]
@@ -434,6 +443,23 @@ def test_freeze_exports_are_key_disjoint_and_checksum_versioned(tmp_path):
         "normalizer_inputs_47d": 42,
     }
     assert acceptance["excluded_cp8_recoveries"] == []
+    assert acceptance["supplement_generator_provenance"] == [
+        {
+            "generator_git_commit": VALID_GENERATOR_SHA,
+            "generator_submodule_commit": VALID_SUBMODULE_SHA,
+        }
+    ]
+    for name in (
+        "geometry_id__base42",
+        "geometry_id__condition_id_interp",
+        "geometry_id__condition_ood_alpha1",
+        "geometry_ood__base42",
+        "geometry_ood__condition_id_interp",
+        "geometry_ood__condition_ood_alpha1",
+    ):
+        assert set(frozen[name]["generator_submodule_commit"]) == {
+            VALID_SUBMODULE_SHA
+        }
     assert set(acceptance["split_ids"]) == {"common_11d_47d", "full_47d"}
     for name, artifact_digest in acceptance["artifact_sha256"].items():
         assert hashlib.sha256((output / name).read_bytes()).hexdigest() == artifact_digest
@@ -469,6 +495,43 @@ def test_failed_historical_cp8_recovery_is_exported_only_for_47d(tmp_path):
     assert acceptance["output_row_counts"]["historical_train_47d_only__base42"] == 42
     assert frozen["normalizer_inputs_11d"].empty
     assert len(frozen["normalizer_inputs_47d"]) == 42
+
+
+@pytest.mark.parametrize(
+    "generator_submodule_commit",
+    ["", "unknown", "b" * 39, "g" * 40],
+)
+def test_audit_excludes_supplement_with_missing_or_invalid_submodule_commit(
+    tmp_path, generator_submodule_commit
+):
+    cp8 = np.array([0.018, 0.031, 0.014, 0.006, 52.0, 21.0, 16.0, 11.0])
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest_payload(cp8), sort_keys=True, separators=(",", ":"))
+    )
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    condition = (4000, 10, 82)
+    write_fake_pkl(
+        tmp_path / "supplement.pkl",
+        geom_id=1000,
+        conditions=[condition],
+        category="geometry_id",
+        manifest_sha256=digest,
+        generator_git_commit=VALID_GENERATOR_SHA,
+        generator_submodule_commit=generator_submodule_commit,
+        condition_split={_condition_key(condition): "base42"},
+        cp8=cp8,
+    )
+
+    report = audit_sources(
+        [tmp_path], expected_base_ids=[], manifest_path=manifest_path
+    )
+    record = report.selected_records[0]
+
+    assert record.generator_submodule_commit == generator_submodule_commit
+    assert "generator_submodule_commit_invalid" in record.exclusion_reasons
+    frozen = freeze_datasets(report, tmp_path / "frozen", version="invalid-submodule")
+    assert frozen["geometry_id__base42"].empty
 
 
 def test_representation_splits_preserve_common_assignments_and_47d_only_membership(
@@ -573,7 +636,8 @@ def test_stale_manifest_metadata_is_preserved_and_explicitly_excluded(tmp_path):
         conditions=conditions,
         category="geometry_ood",
         manifest_sha256=digest,
-        generator_git_commit="abc",
+        generator_git_commit=VALID_GENERATOR_SHA,
+        generator_submodule_commit=VALID_SUBMODULE_SHA,
         condition_split=correct_splits,
         cp8=cp8,
     )
@@ -585,7 +649,8 @@ def test_stale_manifest_metadata_is_preserved_and_explicitly_excluded(tmp_path):
         conditions=conditions,
         category="geometry_ood",
         manifest_sha256=digest,
-        generator_git_commit="abc",
+        generator_git_commit=VALID_GENERATOR_SHA,
+        generator_submodule_commit=VALID_SUBMODULE_SHA,
         condition_split=stale_splits,
         cp8=cp8,
     )

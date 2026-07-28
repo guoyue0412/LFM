@@ -50,6 +50,7 @@ import numpy as np
 import pandas as pd
 
 LFM_ROOT = Path(__file__).resolve().parent.parent
+SUPERPROJECT_ROOT = LFM_ROOT.parent
 if str(LFM_ROOT) not in sys.path:
     sys.path.insert(0, str(LFM_ROOT))
 
@@ -277,7 +278,7 @@ def _condition_split_map(task: ManifestTask) -> dict[str, str]:
 
 
 def _valid_manifest_condition_keys(
-    node: object, task: ManifestTask
+    node: object, task: ManifestTask, expected_provenance: dict[str, str]
 ) -> set[str]:
     """Return valid declared condition keys from one exact manifest node."""
     if not isinstance(node, dict):
@@ -291,6 +292,7 @@ def _valid_manifest_condition_keys(
     except (KeyError, TypeError, ValueError):
         return set()
     generator_commit = node.get("generator_git_commit")
+    generator_submodule_commit = node.get("generator_submodule_commit")
     split_map = node.get("condition_split")
     metadata_valid = (
         node.get("geom_id") == task.geom_id
@@ -301,6 +303,10 @@ def _valid_manifest_condition_keys(
         and set(split_map) == condition_keys
         and condition_keys.issubset(expected_splits)
         and _is_full_git_sha(generator_commit)
+        and _is_full_git_sha(generator_submodule_commit)
+        and generator_commit == expected_provenance["generator_git_commit"]
+        and generator_submodule_commit
+        == expected_provenance["generator_submodule_commit"]
         and np.array_equal(control_points, task.cp8)
         and np.array_equal(sections, task.sections)
         and np.array_equal(geometry, task.geometry)
@@ -317,13 +323,17 @@ def _valid_manifest_condition_keys(
 
 def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
     expected_keys = set(_condition_split_map(task))
-    return _valid_manifest_condition_keys(node, task) == expected_keys
+    return (
+        _valid_manifest_condition_keys(node, task, _generator_provenance())
+        == expected_keys
+    )
 
 
 def find_completed_manifest_conditions(
     output_dir: str | Path, tasks: list[ManifestTask]
 ) -> dict[int, set[str]]:
     """Union exact valid condition keys across checkpoint and aggregate pkls."""
+    expected_provenance = _generator_provenance()
     task_by_id = {task.geom_id: task for task in tasks}
     completed: dict[int, set[str]] = {}
     for path in sorted(Path(output_dir).glob("*.pkl")):
@@ -338,7 +348,7 @@ def find_completed_manifest_conditions(
             continue
         for geom_id, task in task_by_id.items():
             valid_keys = _valid_manifest_condition_keys(
-                payload.get(f"geometry_{geom_id}"), task
+                payload.get(f"geometry_{geom_id}"), task, expected_provenance
             )
             if valid_keys:
                 completed.setdefault(geom_id, set()).update(valid_keys)
@@ -532,20 +542,72 @@ def _is_nonempty_condition_frame(value: object) -> bool:
     return isinstance(value, pd.DataFrame) and not value.empty
 
 
-def _generator_git_commit() -> str:
+def _git_commit(repo: Path, label: str) -> str:
     try:
         commit = subprocess.check_output(
-            ["git", "-C", str(LFM_ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
+            ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD^{commit}"],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
     except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError("cannot resolve generator Git commit") from error
+        raise RuntimeError(f"cannot resolve {label} Git commit") from error
     if not _is_full_git_sha(commit):
         raise RuntimeError(
-            "generator Git commit must be a full 40-character hexadecimal SHA"
+            f"{label} Git commit must be a full 40-character hexadecimal SHA"
         )
     return commit
+
+
+def _generator_git_commit() -> str:
+    return _git_commit(SUPERPROJECT_ROOT, "generator")
+
+
+def _generator_submodule_commit() -> str:
+    return _git_commit(SUBMODULE_ROOT, "generator submodule")
+
+
+def _generator_gitlink_commit() -> str:
+    relative_submodule = SUBMODULE_ROOT.relative_to(SUPERPROJECT_ROOT)
+    try:
+        output = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(SUPERPROJECT_ROOT),
+                "ls-tree",
+                "HEAD",
+                "--",
+                str(relative_submodule),
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("cannot resolve generator submodule gitlink") from error
+    parts = output.split(maxsplit=3)
+    if (
+        len(parts) != 4
+        or parts[0] != "160000"
+        or parts[1] != "commit"
+        or not _is_full_git_sha(parts[2])
+    ):
+        raise RuntimeError("generator submodule gitlink is not a full Git commit")
+    return parts[2]
+
+
+def _generator_provenance() -> dict[str, str]:
+    generator_commit = _generator_git_commit()
+    submodule_commit = _generator_submodule_commit()
+    gitlink_commit = _generator_gitlink_commit()
+    if submodule_commit != gitlink_commit:
+        raise RuntimeError(
+            "generator submodule HEAD does not match superproject gitlink: "
+            f"{submodule_commit} != {gitlink_commit}"
+        )
+    return {
+        "generator_git_commit": generator_commit,
+        "generator_submodule_commit": submodule_commit,
+    }
 
 
 def _condition_checkpoint_path(
@@ -584,7 +646,7 @@ def _write_condition_checkpoint(
     key: str,
     split: str,
     frame: pd.DataFrame,
-    generator_commit: str,
+    generator_provenance: dict[str, str],
 ) -> Path:
     """Atomically persist one successful declared manifest condition."""
     node = {
@@ -597,7 +659,7 @@ def _write_condition_checkpoint(
         "condition_split": {key: split},
         "seed": task.seed,
         "manifest_sha256": task.manifest_sha256,
-        "generator_git_commit": generator_commit,
+        **generator_provenance,
     }
     destination = _condition_checkpoint_path(output_dir, task, key)
     _atomic_pickle_dump({f"geometry_{task.geom_id}": node}, destination)
@@ -614,6 +676,7 @@ def _worker_run_manifest(
     t0 = time.time()
     sim = None
     try:
+        generator_provenance = _generator_provenance()
         sim = _SIMULATION(
             file_path=_config.file_path,
             geometry_baseline=_config.geometry_baseline,
@@ -623,7 +686,6 @@ def _worker_run_manifest(
         sim.change_propeller_geometry(section_data=manifest_task.geometry)
         condition_results = {}
         split_map = {}
-        generator_commit = _generator_git_commit()
         for rpm, wind, angle, split in manifest_task.conditions:
             key = condition_key(rpm, wind, angle)
             sim.run_one_simulation(RPM=rpm, WIND_SPEED=wind, ANGLE=angle)
@@ -643,7 +705,7 @@ def _worker_run_manifest(
                     key,
                     split,
                     frame,
-                    generator_commit,
+                    generator_provenance,
                 )
 
         result = {
@@ -656,7 +718,7 @@ def _worker_run_manifest(
             "condition_split": split_map,
             "seed": manifest_task.seed,
             "manifest_sha256": manifest_task.manifest_sha256,
-            "generator_git_commit": generator_commit,
+            **generator_provenance,
         }
         elapsed = time.time() - t0
         print(

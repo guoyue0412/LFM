@@ -56,6 +56,7 @@ PROVENANCE_COLUMNS = [
     "output_sign_source",
     "geom_id_source",
     "generator_git_commit",
+    "generator_submodule_commit",
     "source_file",
 ]
 DATA_COLUMNS = (
@@ -103,6 +104,7 @@ class AuditRecord:
     manifest_sha_match: bool
     manifest_sha256: str
     generator_git_commit: str
+    generator_submodule_commit: str
     mtime: float
     category: str
     condition_split: str
@@ -221,6 +223,10 @@ def _number(value: object, label: str) -> float:
     if not np.isfinite(number):
         raise ValueError(f"{label} must be finite")
     return number
+
+
+def _is_full_git_sha(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{40}", value) is not None
 
 
 def _condition_tuple(rpm: object, wind: object, angle: object) -> ConditionKey:
@@ -345,6 +351,7 @@ def _candidate_rank(record: AuditRecord) -> tuple:
         record.valid_outputs,
         record.geom_id_source == "stored_geom_id",
         record.manifest_sha_match,
+        _is_full_git_sha(record.generator_submodule_commit),
         bool(record.generator_git_commit.strip()),
         record.mtime,
         record.source_file,
@@ -360,6 +367,11 @@ def _decision_reason(selected: AuditRecord, discarded: AuditRecord) -> str:
             "explicit_stored_geom_id",
         ),
         (selected.manifest_sha_match, discarded.manifest_sha_match, "manifest_sha_match"),
+        (
+            _is_full_git_sha(selected.generator_submodule_commit),
+            _is_full_git_sha(discarded.generator_submodule_commit),
+            "generator_submodule_git_metadata",
+        ),
         (
             bool(selected.generator_git_commit.strip()),
             bool(discarded.generator_git_commit.strip()),
@@ -473,6 +485,18 @@ def audit_sources(
             manifest_sha_match = bool(
                 manifest_record is not None and stored_sha == manifest.digest
             )
+            generator_commit = node.get("generator_git_commit", "")
+            generator_commit = (
+                generator_commit if isinstance(generator_commit, str) else ""
+            )
+            generator_submodule_commit = node.get(
+                "generator_submodule_commit", ""
+            )
+            generator_submodule_commit = (
+                generator_submodule_commit
+                if isinstance(generator_submodule_commit, str)
+                else ""
+            )
             node_exclusion_reasons: list[str] = []
             if manifest_record is not None:
                 expected_category = manifest_record.get("category")
@@ -509,6 +533,18 @@ def audit_sources(
                             "reason": "manifest_sha256_mismatch",
                             "stored": stored_sha,
                             "expected": manifest.digest,
+                        }
+                    )
+                if not _is_full_git_sha(generator_submodule_commit):
+                    node_exclusion_reasons.append(
+                        "generator_submodule_commit_invalid"
+                    )
+                    metadata_errors.append(
+                        {
+                            "source_file": str(source_file),
+                            "geom_id": geom_id,
+                            "reason": "generator_submodule_commit_invalid",
+                            "stored": generator_submodule_commit,
                         }
                     )
                 try:
@@ -551,8 +587,6 @@ def audit_sources(
                                 "reason": str(error),
                             }
                         )
-            generator_commit = node.get("generator_git_commit", "")
-            generator_commit = generator_commit if isinstance(generator_commit, str) else ""
             mtime = source_file.stat().st_mtime
 
             for case_key, case_frame in node.items():
@@ -625,6 +659,7 @@ def audit_sources(
                     manifest_sha_match=manifest_sha_match,
                     manifest_sha256=stored_sha,
                     generator_git_commit=generator_commit,
+                    generator_submodule_commit=generator_submodule_commit,
                     mtime=mtime,
                     category=category,
                     condition_split=condition_split,
@@ -820,6 +855,7 @@ def _record_row(record: AuditRecord, *, include_cp8: bool = True) -> dict:
         "output_sign_source": record.output_sign_source,
         "geom_id_source": record.geom_id_source,
         "generator_git_commit": record.generator_git_commit,
+        "generator_submodule_commit": record.generator_submodule_commit,
         "source_file": record.source_file,
     }
     if include_cp8:
@@ -926,6 +962,22 @@ def freeze_datasets(
         raise RuntimeError("a supplement key cannot be both exported and excluded")
     if exported_supplement_keys | excluded_supplement_keys != supplement_keys:
         raise RuntimeError("every selected supplement key must be exported or excluded")
+    supplement_generator_provenance = [
+        {
+            "generator_git_commit": generator_commit,
+            "generator_submodule_commit": submodule_commit,
+        }
+        for generator_commit, submodule_commit in sorted(
+            {
+                (
+                    record.generator_git_commit,
+                    record.generator_submodule_commit,
+                )
+                for name in EXTERNAL_PARTITION_NAMES
+                for record in partition_records[name]
+            }
+        )
+    ]
     common_train_ids = set(common_split_ids["train"])
     full_47d_train_ids = set(full_47d_split_ids["train"])
     normalizer_11d_records = [
@@ -1059,6 +1111,7 @@ def freeze_datasets(
         "supplement_selected_key_count": len(supplement_keys),
         "supplement_exported_key_count": len(exported_supplement_keys),
         "supplement_excluded_key_count": len(excluded_supplement_keys),
+        "supplement_generator_provenance": supplement_generator_provenance,
         "output_row_counts": output_row_counts,
         "split_ids": split_ids,
         "artifact_sha256": artifact_sha256,
@@ -1118,6 +1171,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         record.generator_git_commit
                         for record in report.selected_records
                         if record.generator_git_commit
+                    }
+                )
+            ),
+            "generator_submodule": ",".join(
+                sorted(
+                    {
+                        record.generator_submodule_commit
+                        for record in report.selected_records
+                        if record.is_supplement
+                        and not record.exclusion_reasons
+                        and record.generator_submodule_commit
                     }
                 )
             ),

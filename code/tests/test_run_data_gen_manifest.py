@@ -15,6 +15,20 @@ from optimization_v2.tools.supplement_manifest import build_condition_sets
 from scripts import run_data_gen_parallel as runner
 
 VALID_GIT_SHA = "a" * 40
+VALID_SUBMODULE_SHA = "b" * 40
+EXPECTED_PROVENANCE = {
+    "generator_git_commit": VALID_GIT_SHA,
+    "generator_submodule_commit": VALID_SUBMODULE_SHA,
+}
+
+
+def _install_generator_provenance(monkeypatch):
+    monkeypatch.setattr(
+        runner,
+        "_generator_provenance",
+        lambda: dict(EXPECTED_PROVENANCE),
+        raising=False,
+    )
 
 
 def _manifest_payload(geom_ids=(1000,)):
@@ -224,6 +238,7 @@ def test_worker_runs_only_declared_conditions_and_stores_metadata(monkeypatch, m
     FakeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
 
@@ -237,7 +252,8 @@ def test_worker_runs_only_declared_conditions_and_stores_metadata(monkeypatch, m
     assert result["category"] == manifest_task.category
     assert result["seed"] == manifest_task.seed
     assert result["manifest_sha256"] == manifest_task.manifest_sha256
-    assert result["generator_git_commit"]
+    assert result["generator_git_commit"] == VALID_GIT_SHA
+    assert result["generator_submodule_commit"] == VALID_SUBMODULE_SHA
     np.testing.assert_array_equal(result["geometry"], manifest_task.geometry)
     declared_keys = {
         runner.condition_key(rpm, wind, angle)
@@ -274,12 +290,57 @@ def test_generator_git_commit_fails_when_git_query_fails(monkeypatch):
         runner._generator_git_commit()
 
 
+def test_generator_provenance_returns_matching_superproject_and_submodule(monkeypatch):
+    monkeypatch.setattr(runner, "_generator_git_commit", lambda: VALID_GIT_SHA)
+    monkeypatch.setattr(
+        runner, "_generator_submodule_commit", lambda: VALID_SUBMODULE_SHA
+    )
+    monkeypatch.setattr(
+        runner, "_generator_gitlink_commit", lambda: VALID_SUBMODULE_SHA
+    )
+
+    assert runner._generator_provenance() == EXPECTED_PROVENANCE
+
+
+def test_generator_provenance_rejects_actual_submodule_gitlink_mismatch(monkeypatch):
+    monkeypatch.setattr(runner, "_generator_git_commit", lambda: VALID_GIT_SHA)
+    monkeypatch.setattr(
+        runner, "_generator_submodule_commit", lambda: VALID_SUBMODULE_SHA
+    )
+    monkeypatch.setattr(runner, "_generator_gitlink_commit", lambda: "c" * 40)
+
+    with pytest.raises(RuntimeError, match="does not match superproject gitlink"):
+        runner._generator_provenance()
+
+
+def test_manifest_worker_rejects_submodule_gitlink_mismatch_before_simulation(
+    monkeypatch, manifest_task
+):
+    FakeSimulation.instances.clear()
+    monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
+    monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+
+    def reject_mismatch():
+        raise RuntimeError("submodule HEAD does not match superproject gitlink")
+
+    monkeypatch.setattr(
+        runner, "_generator_provenance", reject_mismatch, raising=False
+    )
+
+    geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
+
+    assert geom_id == manifest_task.geom_id and result is None
+    assert "does not match superproject gitlink" in error
+    assert FakeSimulation.instances == []
+
+
 def test_worker_rejects_empty_declared_condition(monkeypatch, manifest_task):
     FakeSimulation.instances.clear()
     FakeSimulation.empty_condition = manifest_task.conditions[0][:3]
     FakeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
 
@@ -301,6 +362,7 @@ def test_worker_uses_persisted_mapping_when_run_returns_none(monkeypatch, manife
     NoneReturningSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", NoneReturningSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
 
@@ -319,6 +381,7 @@ def test_worker_rejects_returned_frame_absent_from_persisted_mapping(
     FakeSimulation.omit_persisted_condition = manifest_task.conditions[0][:3]
     monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
 
@@ -338,6 +401,7 @@ def test_worker_close_error_does_not_override_success(monkeypatch, manifest_task
     CloseFailingSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", CloseFailingSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run((manifest_task, 1000, "CPU"))
 
@@ -363,6 +427,7 @@ def _stored_result(task, conditions=None):
         "seed": task.seed,
         "manifest_sha256": task.manifest_sha256,
         "generator_git_commit": VALID_GIT_SHA,
+        "generator_submodule_commit": VALID_SUBMODULE_SHA,
     }
 
 
@@ -384,8 +449,7 @@ def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys
     CrashAfterThreeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", CrashAfterThreeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
-    generator_commit = "c" * 40
-    monkeypatch.setattr(runner, "_generator_git_commit", lambda: generator_commit)
+    _install_generator_provenance(monkeypatch)
 
     geom_id, result, error = runner.worker_run(
         (task, 1000, "CPU", checkpoint_dir)
@@ -407,7 +471,8 @@ def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys
     assert node["geom_id"] == task.geom_id
     assert node["category"] == task.category
     assert node["manifest_sha256"] == task.manifest_sha256
-    assert node["generator_git_commit"] == generator_commit
+    assert node["generator_git_commit"] == VALID_GIT_SHA
+    assert node["generator_submodule_commit"] == VALID_SUBMODULE_SHA
     np.testing.assert_array_equal(node["control_points"], task.cp8)
     np.testing.assert_array_equal(node["sections"], task.sections)
     np.testing.assert_array_equal(node["geometry"], task.geometry)
@@ -461,7 +526,8 @@ def test_condition_checkpoint_filename_uses_full_digests(tmp_path):
     )
 
 
-def test_resume_unions_valid_condition_keys_across_multiple_pickles(tmp_path):
+def test_resume_unions_valid_condition_keys_across_multiple_pickles(monkeypatch, tmp_path):
+    _install_generator_provenance(monkeypatch)
     task = runner.build_manifest_tasks(
         runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
     )[0]
@@ -481,7 +547,8 @@ def test_resume_unions_valid_condition_keys_across_multiple_pickles(tmp_path):
     assert runner.find_completed_manifest_ids(tmp_path, [task]) == {task.geom_id}
 
 
-def test_resume_rejects_corrupt_mismatched_and_empty_checkpoints(tmp_path):
+def test_resume_rejects_corrupt_mismatched_and_empty_checkpoints(monkeypatch, tmp_path):
+    _install_generator_provenance(monkeypatch)
     task = runner.build_manifest_tasks(
         runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
     )[0]
@@ -506,6 +573,7 @@ def test_resume_rejects_corrupt_mismatched_and_empty_checkpoints(tmp_path):
 def test_resume_skips_any_pickle_deserialization_failure(
     monkeypatch, tmp_path, load_error
 ):
+    _install_generator_provenance(monkeypatch)
     task = runner.build_manifest_tasks(
         runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
     )[0]
@@ -524,7 +592,8 @@ def test_resume_skips_any_pickle_deserialization_failure(
     assert runner.find_completed_manifest_ids(tmp_path, [task]) == {task.geom_id}
 
 
-def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
+def test_resume_skips_only_exact_complete_manifest_nodes(monkeypatch, tmp_path):
+    _install_generator_provenance(monkeypatch)
     manifest = runner.load_manifest(
         _write_manifest(tmp_path, _manifest_payload(tuple(range(1000, 1005))))
     )
@@ -554,15 +623,42 @@ def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
         lambda node, key: node.__setitem__("generator_git_commit", "a" * 39),
         lambda node, key: node.__setitem__("generator_git_commit", "g" * 40),
         lambda node, key: node.pop("generator_git_commit"),
+        lambda node, key: node.__setitem__("generator_submodule_commit", ""),
+        lambda node, key: node.__setitem__("generator_submodule_commit", "unknown"),
+        lambda node, key: node.__setitem__("generator_submodule_commit", "b" * 39),
+        lambda node, key: node.__setitem__("generator_submodule_commit", "g" * 40),
+        lambda node, key: node.pop("generator_submodule_commit"),
     ],
 )
-def test_resume_rejects_invalid_condition_payload_or_commit(tmp_path, corrupt):
+def test_resume_rejects_invalid_condition_payload_or_commit(
+    monkeypatch, tmp_path, corrupt
+):
+    _install_generator_provenance(monkeypatch)
     manifest = runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
     task = runner.build_manifest_tasks(manifest)[0]
     node = _stored_result(task)
     first_key = runner.condition_key(*task.conditions[0][:3])
     corrupt(node, first_key)
     with (tmp_path / "corrupt.pkl").open("wb") as handle:
+        pickle.dump({f"geometry_{task.geom_id}": node}, handle)
+
+    assert runner.find_completed_manifest_ids(tmp_path, [task]) == set()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["generator_git_commit", "generator_submodule_commit"],
+)
+def test_resume_rejects_checkpoint_from_different_generator_provenance(
+    monkeypatch, tmp_path, field
+):
+    _install_generator_provenance(monkeypatch)
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    node = _stored_result(task)
+    node[field] = "c" * 40
+    with (tmp_path / "different-provenance.pkl").open("wb") as handle:
         pickle.dump({f"geometry_{task.geom_id}": node}, handle)
 
     assert runner.find_completed_manifest_ids(tmp_path, [task]) == set()
@@ -601,7 +697,8 @@ def test_manifest_output_name_includes_digest_tag():
     assert name == "data_supplement_manifest-abcdef123456_20260727_230000_b0003.pkl"
 
 
-def test_prepare_manifest_run_filters_only_valid_completed_ids(tmp_path):
+def test_prepare_manifest_run_filters_only_valid_completed_ids(monkeypatch, tmp_path):
+    _install_generator_provenance(monkeypatch)
     manifest_path = _write_manifest(tmp_path, _manifest_payload((1000, 1001)))
     loaded = runner.load_manifest(manifest_path)
     first_task = runner.build_manifest_tasks(loaded, geom_ids={1000})[0]
