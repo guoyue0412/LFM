@@ -161,6 +161,25 @@ def test_manifest_subset_still_validates_unselected_records(tmp_path):
         runner.build_manifest_tasks(manifest, geom_ids={1000})
 
 
+def test_condition_split_selector_still_validates_unselected_geometry(
+    monkeypatch, tmp_path
+):
+    _install_generator_provenance(monkeypatch)
+    payload = _manifest_payload((1000, 1001))
+    payload["geometries"][1]["sections"][0] += 1e-9
+    manifest_path = _write_manifest(tmp_path, payload)
+
+    with pytest.raises(ValueError, match="geometry 1001.*cp8-section mismatch"):
+        runner.prepare_manifest_run(
+            manifest_path=manifest_path,
+            geom_ids={1000},
+            expected_sha256=None,
+            output_dir=tmp_path / "output",
+            condition_splits={"condition_ood_alpha1"},
+            condition_keys=None,
+        )
+
+
 def test_manifest_requires_exact_condition_split_counts(tmp_path):
     payload = _manifest_payload()
     payload["geometries"][0]["conditions"].pop()
@@ -686,6 +705,161 @@ def test_manifest_cli_arguments_and_exact_id_parser(monkeypatch):
     assert args.manifest_sha256 == "a" * 64
     with pytest.raises(ValueError, match="comma-separated integers"):
         runner.parse_geom_ids("1000,nope")
+
+
+def test_condition_selector_parsers_and_mutual_exclusion(monkeypatch, tmp_path):
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    exact_key = runner.condition_key(*task.conditions[0][:3])
+
+    assert runner.parse_condition_splits("condition_ood_alpha1,base42") == {
+        "condition_ood_alpha1",
+        "base42",
+    }
+    assert runner.parse_condition_keys(exact_key) == {exact_key}
+    with pytest.raises(ValueError, match="unknown condition split"):
+        runner.parse_condition_splits("not_a_split")
+    with pytest.raises(ValueError, match="condition key"):
+        runner.parse_condition_keys("not-a-condition-key")
+
+    _install_generator_provenance(monkeypatch)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        runner.prepare_manifest_run(
+            manifest_path=tmp_path / "manifest.json",
+            geom_ids=None,
+            expected_sha256=None,
+            output_dir=tmp_path / "output",
+            condition_splits={"base42"},
+            condition_keys={exact_key},
+        )
+
+
+def test_condition_split_selector_keeps_six_alpha1_keys_per_geometry(
+    monkeypatch, tmp_path
+):
+    _install_generator_provenance(monkeypatch)
+    manifest_path = _write_manifest(tmp_path, _manifest_payload((1000, 1001)))
+
+    pending, completed, _ = runner.prepare_manifest_run(
+        manifest_path=manifest_path,
+        geom_ids=None,
+        expected_sha256=None,
+        output_dir=tmp_path / "output",
+        condition_splits={"condition_ood_alpha1"},
+        condition_keys=None,
+    )
+
+    assert completed == set()
+    assert [len(task.conditions) for task in pending] == [6, 6]
+    assert all(
+        {split for _, _, _, split in task.conditions}
+        == {"condition_ood_alpha1"}
+        for task in pending
+    )
+
+
+def test_exact_condition_key_selector_keeps_one_declared_base_key(
+    monkeypatch, tmp_path
+):
+    _install_generator_provenance(monkeypatch)
+    manifest_path = _write_manifest(tmp_path, _manifest_payload())
+    full_task = runner.build_manifest_tasks(runner.load_manifest(manifest_path))[0]
+    base_condition = next(
+        condition for condition in full_task.conditions if condition[3] == "base42"
+    )
+    exact_key = runner.condition_key(*base_condition[:3])
+
+    pending, _, _ = runner.prepare_manifest_run(
+        manifest_path=manifest_path,
+        geom_ids={full_task.geom_id},
+        expected_sha256=None,
+        output_dir=tmp_path / "output",
+        condition_splits=None,
+        condition_keys={exact_key},
+    )
+
+    assert pending[0].conditions == (base_condition,)
+
+
+def test_filtered_resume_unions_selected_keys_from_multi_file_full_manifest_nodes(
+    monkeypatch, tmp_path
+):
+    _install_generator_provenance(monkeypatch)
+    manifest_path = _write_manifest(tmp_path, _manifest_payload())
+    full_task = runner.build_manifest_tasks(runner.load_manifest(manifest_path))[0]
+    alpha = tuple(
+        condition
+        for condition in full_task.conditions
+        if condition[3] == "condition_ood_alpha1"
+    )
+    base = tuple(
+        condition for condition in full_task.conditions if condition[3] == "base42"
+    )
+    interpolation = tuple(
+        condition
+        for condition in full_task.conditions
+        if condition[3] == "condition_id_interp"
+    )
+    with (tmp_path / "first.pkl").open("wb") as handle:
+        pickle.dump(
+            {
+                f"geometry_{full_task.geom_id}": _stored_result(
+                    full_task, (*base, *alpha[:3])
+                )
+            },
+            handle,
+        )
+    with (tmp_path / "second.pkl").open("wb") as handle:
+        pickle.dump(
+            {
+                f"geometry_{full_task.geom_id}": _stored_result(
+                    full_task, (*interpolation, *alpha[3:])
+                )
+            },
+            handle,
+        )
+
+    pending, completed, _ = runner.prepare_manifest_run(
+        manifest_path=manifest_path,
+        geom_ids={full_task.geom_id},
+        expected_sha256=None,
+        output_dir=tmp_path,
+        condition_splits={"condition_ood_alpha1"},
+        condition_keys=None,
+    )
+
+    assert pending == []
+    assert completed == {full_task.geom_id}
+
+
+def test_condition_key_selector_rejects_absent_exact_key(monkeypatch, tmp_path):
+    _install_generator_provenance(monkeypatch)
+    manifest_path = _write_manifest(tmp_path, _manifest_payload())
+
+    with pytest.raises(ValueError, match="absent from selected manifest geometries"):
+        runner.prepare_manifest_run(
+            manifest_path=manifest_path,
+            geom_ids=None,
+            expected_sha256=None,
+            output_dir=tmp_path / "output",
+            condition_splits=None,
+            condition_keys={"RPM9999.0_Wind10.0_Angle90.0"},
+        )
+
+
+def test_legacy_cli_rejects_condition_selector(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["runner", "--condition-splits", "base42"],
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="--condition-splits/--condition-keys require --manifest",
+    ):
+        runner.main()
 
 
 def test_manifest_output_name_includes_digest_tag():

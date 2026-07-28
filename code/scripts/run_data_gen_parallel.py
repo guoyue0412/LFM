@@ -37,6 +37,7 @@ import json
 import multiprocessing as mp
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,11 @@ SUB_LIB_ROOT = SUBMODULE_ROOT / "QBladeCE_2.0.8.6"
 CONDITION_SPLITS = frozenset(
     {"base42", "condition_id_interp", "condition_ood_alpha1"}
 )
+CONDITION_NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+CONDITION_KEY_PATTERN = re.compile(
+    rf"RPM{CONDITION_NUMBER_PATTERN}_Wind{CONDITION_NUMBER_PATTERN}_"
+    rf"Angle{CONDITION_NUMBER_PATTERN}"
+)
 EXPECTED_SPLIT_COUNTS = {
     "base42": 42,
     "condition_id_interp": 15,
@@ -88,6 +94,8 @@ class ManifestTask:
     cp8: np.ndarray
     geometry: np.ndarray
     conditions: tuple[tuple[float, float, float, str], ...]
+    declared_conditions: tuple[tuple[float, float, float, str], ...]
+    manifest_conditions: tuple[tuple[float, float, float, str], ...]
     seed: int
     manifest_sha256: str
 
@@ -248,6 +256,8 @@ def build_manifest_tasks(
                 cp8=cp8,
                 geometry=geometry,
                 conditions=conditions,
+                declared_conditions=conditions,
+                manifest_conditions=conditions,
                 seed=seed,
                 manifest_sha256=manifest.sha256,
             )
@@ -270,10 +280,110 @@ def parse_geom_ids(value: str | None) -> set[int] | None:
         raise ValueError("--geom-ids must be comma-separated integers") from error
 
 
+def parse_condition_splits(value: str | None) -> set[str] | None:
+    """Parse a comma-separated set of exact declared condition split names."""
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise ValueError("--condition-splits must be comma-separated split names")
+    requested = set(parts)
+    unknown = requested - CONDITION_SPLITS
+    if unknown:
+        raise ValueError(f"unknown condition split: {sorted(unknown)}")
+    return requested
+
+
+def parse_condition_keys(value: str | None) -> set[str] | None:
+    """Parse comma-separated exact serialized manifest condition keys."""
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if (
+        not parts
+        or any(not part for part in parts)
+        or any(CONDITION_KEY_PATTERN.fullmatch(part) is None for part in parts)
+    ):
+        raise ValueError("--condition-keys contains an invalid condition key")
+    return set(parts)
+
+
+def select_manifest_task_conditions(
+    tasks: list[ManifestTask],
+    *,
+    condition_splits: set[str] | None,
+    condition_keys: set[str] | None,
+) -> list[ManifestTask]:
+    """Filter fully validated tasks while retaining their original declarations."""
+    if condition_splits is not None and condition_keys is not None:
+        raise ValueError("condition split and condition key selectors are mutually exclusive")
+    if condition_splits is not None:
+        if not condition_splits:
+            raise ValueError("condition split selector must not be empty")
+        unknown = condition_splits - CONDITION_SPLITS
+        if unknown:
+            raise ValueError(f"unknown condition split: {sorted(unknown)}")
+    if condition_keys is not None:
+        if not condition_keys:
+            raise ValueError("condition key selector must not be empty")
+        invalid = sorted(
+            key
+            for key in condition_keys
+            if not isinstance(key, str) or CONDITION_KEY_PATTERN.fullmatch(key) is None
+        )
+        if invalid:
+            raise ValueError(f"invalid condition key: {invalid}")
+    if condition_splits is None and condition_keys is None:
+        return tasks
+
+    selected_tasks = []
+    for task in tasks:
+        manifest_keys = {
+            condition_key(*condition[:3]) for condition in task.manifest_conditions
+        }
+        if condition_keys is not None:
+            missing = condition_keys - manifest_keys
+            if missing:
+                raise ValueError(
+                    "condition keys absent from selected manifest geometries: "
+                    f"geom_id={task.geom_id}, keys={sorted(missing)}"
+                )
+            selected_conditions = tuple(
+                condition
+                for condition in task.manifest_conditions
+                if condition_key(*condition[:3]) in condition_keys
+            )
+        else:
+            selected_conditions = tuple(
+                condition
+                for condition in task.manifest_conditions
+                if condition[3] in condition_splits
+            )
+        if not selected_conditions:
+            raise ValueError(
+                f"condition selector produced no conditions for geom_id={task.geom_id}"
+            )
+        selected_tasks.append(
+            replace(
+                task,
+                conditions=selected_conditions,
+                declared_conditions=selected_conditions,
+            )
+        )
+    return selected_tasks
+
+
 def _condition_split_map(task: ManifestTask) -> dict[str, str]:
     return {
         condition_key(rpm, wind, angle): split
-        for rpm, wind, angle, split in task.conditions
+        for rpm, wind, angle, split in task.declared_conditions
+    }
+
+
+def _manifest_condition_split_map(task: ManifestTask) -> dict[str, str]:
+    return {
+        condition_key(rpm, wind, angle): split
+        for rpm, wind, angle, split in task.manifest_conditions
     }
 
 
@@ -284,6 +394,7 @@ def _valid_manifest_condition_keys(
     if not isinstance(node, dict):
         return set()
     expected_splits = _condition_split_map(task)
+    manifest_splits = _manifest_condition_split_map(task)
     condition_keys = {key for key in node if isinstance(key, str) and key.startswith("RPM")}
     try:
         control_points = np.asarray(node["control_points"], dtype=np.float64)
@@ -301,7 +412,8 @@ def _valid_manifest_condition_keys(
         and node.get("seed") == task.seed
         and isinstance(split_map, dict)
         and set(split_map) == condition_keys
-        and condition_keys.issubset(expected_splits)
+        and condition_keys.issubset(manifest_splits)
+        and all(split_map[key] == manifest_splits[key] for key in condition_keys)
         and _is_full_git_sha(generator_commit)
         and _is_full_git_sha(generator_submodule_commit)
         and generator_commit == expected_provenance["generator_git_commit"]
@@ -316,7 +428,7 @@ def _valid_manifest_condition_keys(
     return {
         key
         for key in condition_keys
-        if split_map[key] == expected_splits[key]
+        if key in expected_splits
         and _is_nonempty_condition_frame(node.get(key))
     }
 
@@ -372,10 +484,17 @@ def prepare_manifest_run(
     geom_ids: set[int] | None,
     expected_sha256: str | None,
     output_dir: str | Path,
+    condition_splits: set[str] | None = None,
+    condition_keys: set[str] | None = None,
 ) -> tuple[list[ManifestTask], set[int], str]:
     """Load, validate, subset, and resume-filter a manifest without QBlade imports."""
     manifest = load_manifest(manifest_path, expected_sha256=expected_sha256)
     selected = build_manifest_tasks(manifest, geom_ids=geom_ids)
+    selected = select_manifest_task_conditions(
+        selected,
+        condition_splits=condition_splits,
+        condition_keys=condition_keys,
+    )
     completed_conditions = find_completed_manifest_conditions(output_dir, selected)
     completed = {
         task.geom_id
@@ -433,6 +552,19 @@ def parse_args() -> argparse.Namespace:
                    help="逗号分隔的精确 manifest geom_id 子集")
     p.add_argument("--manifest-sha256", type=str, default=None,
                    help="可选的 manifest 文件字节 SHA-256；存在 sidecar 时也会自动校验")
+    condition_selector = p.add_mutually_exclusive_group()
+    condition_selector.add_argument(
+        "--condition-splits",
+        type=str,
+        default=None,
+        help="逗号分隔的精确 manifest 工况 split 子集",
+    )
+    condition_selector.add_argument(
+        "--condition-keys",
+        type=str,
+        default=None,
+        help="逗号分隔的精确序列化 manifest condition_key 子集",
+    )
     p.add_argument("--first-n-geoms", type=int, default=None,
                    help="只跑前 N 个几何，用于产能基线测试")
     p.add_argument("--start-idx", type=int, default=0,
@@ -820,11 +952,17 @@ def main() -> int:
             )
         try:
             requested_ids = parse_geom_ids(args.geom_ids)
+            requested_condition_splits = parse_condition_splits(
+                args.condition_splits
+            )
+            requested_condition_keys = parse_condition_keys(args.condition_keys)
             manifest_tasks, completed_ids, manifest_digest = prepare_manifest_run(
                 manifest_path=args.manifest,
                 geom_ids=requested_ids,
                 expected_sha256=args.manifest_sha256,
                 output_dir=out_dir,
+                condition_splits=requested_condition_splits,
+                condition_keys=requested_condition_keys,
             )
         except (OSError, json.JSONDecodeError, ValueError) as error:
             sys.exit(f"✖ manifest validation failed: {error}")
@@ -844,6 +982,8 @@ def main() -> int:
             for task in manifest_tasks
         ]
     else:
+        if args.condition_splits is not None or args.condition_keys is not None:
+            sys.exit("✖ --condition-splits/--condition-keys require --manifest")
         if args.geom_ids is not None or args.manifest_sha256 is not None:
             sys.exit("✖ --geom-ids/--manifest-sha256 require --manifest")
 
