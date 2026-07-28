@@ -107,6 +107,14 @@ def _checked_digest(actual: str, expected: str, source: str) -> None:
         raise ValueError(f"{source} SHA-256 mismatch: expected {expected}, got {actual}")
 
 
+def _is_full_git_sha(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(char in "0123456789abcdef" for char in value.lower())
+    )
+
+
 def load_manifest(
     path: str | Path, expected_sha256: str | None = None
 ) -> LoadedManifest:
@@ -292,8 +300,7 @@ def _valid_manifest_condition_keys(
         and isinstance(split_map, dict)
         and set(split_map) == condition_keys
         and condition_keys.issubset(expected_splits)
-        and isinstance(generator_commit, str)
-        and bool(generator_commit.strip())
+        and _is_full_git_sha(generator_commit)
         and np.array_equal(control_points, task.cp8)
         and np.array_equal(sections, task.sections)
         and np.array_equal(geometry, task.geometry)
@@ -323,7 +330,9 @@ def find_completed_manifest_conditions(
         try:
             with path.open("rb") as handle:
                 payload = pickle.load(handle)
-        except (OSError, EOFError, pickle.UnpicklingError, AttributeError, ValueError):
+        # Pickle reducers/imports can raise arbitrary ordinary exceptions. A single
+        # unreadable file is invalid resume evidence, not a reason to abort scanning.
+        except Exception:
             continue
         if not isinstance(payload, dict):
             continue
@@ -525,22 +534,27 @@ def _is_nonempty_condition_frame(value: object) -> bool:
 
 def _generator_git_commit() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "-C", str(LFM_ROOT), "rev-parse", "HEAD"],
+        commit = subprocess.check_output(
+            ["git", "-C", str(LFM_ROOT), "rev-parse", "--verify", "HEAD^{commit}"],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("cannot resolve generator Git commit") from error
+    if not _is_full_git_sha(commit):
+        raise RuntimeError(
+            "generator Git commit must be a full 40-character hexadecimal SHA"
+        )
+    return commit
 
 
 def _condition_checkpoint_path(
     output_dir: str | Path, task: ManifestTask, key: str
 ) -> Path:
     """Return a deterministic filename for one manifest condition checkpoint."""
-    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return Path(output_dir) / (
-        f"checkpoint_manifest-{task.manifest_sha256[:12]}_"
+        f"checkpoint_manifest-{task.manifest_sha256}_"
         f"geometry-{task.geom_id}_{key_digest}.pkl"
     )
 

@@ -14,6 +14,8 @@ from optimization_v2.geometry import GEOMETRY_R, cp_to_sections
 from optimization_v2.tools.supplement_manifest import build_condition_sets
 from scripts import run_data_gen_parallel as runner
 
+VALID_GIT_SHA = "a" * 40
+
 
 def _manifest_payload(geom_ids=(1000,)):
     cp8 = np.array([0.018, 0.031, 0.014, 0.006, 52.0, 21.0, 16.0, 11.0])
@@ -249,6 +251,29 @@ def test_worker_runs_only_declared_conditions_and_stores_metadata(monkeypatch, m
     assert "Base_simulation" not in result
 
 
+@pytest.mark.parametrize(
+    "git_output",
+    ["unknown\n", "a" * 39 + "\n", "g" * 40 + "\n", "   \n"],
+)
+def test_generator_git_commit_rejects_non_full_sha(monkeypatch, git_output):
+    monkeypatch.setattr(
+        runner.subprocess, "check_output", lambda *args, **kwargs: git_output
+    )
+
+    with pytest.raises(RuntimeError, match="40-character hexadecimal"):
+        runner._generator_git_commit()
+
+
+def test_generator_git_commit_fails_when_git_query_fails(monkeypatch):
+    def fail_git_query(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "HEAD"])
+
+    monkeypatch.setattr(runner.subprocess, "check_output", fail_git_query)
+
+    with pytest.raises(RuntimeError, match="cannot resolve generator Git commit"):
+        runner._generator_git_commit()
+
+
 def test_worker_rejects_empty_declared_condition(monkeypatch, manifest_task):
     FakeSimulation.instances.clear()
     FakeSimulation.empty_condition = manifest_task.conditions[0][:3]
@@ -337,7 +362,7 @@ def _stored_result(task, conditions=None):
         "condition_split": condition_split,
         "seed": task.seed,
         "manifest_sha256": task.manifest_sha256,
-        "generator_git_commit": "abc123",
+        "generator_git_commit": VALID_GIT_SHA,
     }
 
 
@@ -359,7 +384,8 @@ def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys
     CrashAfterThreeSimulation.omit_persisted_condition = None
     monkeypatch.setattr(runner, "_SIMULATION", CrashAfterThreeSimulation, raising=False)
     monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
-    monkeypatch.setattr(runner, "_generator_git_commit", lambda: "commit123")
+    generator_commit = "c" * 40
+    monkeypatch.setattr(runner, "_generator_git_commit", lambda: generator_commit)
 
     geom_id, result, error = runner.worker_run(
         (task, 1000, "CPU", checkpoint_dir)
@@ -381,7 +407,7 @@ def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys
     assert node["geom_id"] == task.geom_id
     assert node["category"] == task.category
     assert node["manifest_sha256"] == task.manifest_sha256
-    assert node["generator_git_commit"] == "commit123"
+    assert node["generator_git_commit"] == generator_commit
     np.testing.assert_array_equal(node["control_points"], task.cp8)
     np.testing.assert_array_equal(node["sections"], task.sections)
     np.testing.assert_array_equal(node["geometry"], task.geometry)
@@ -418,6 +444,21 @@ def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys
         key for key in resumed_result if isinstance(key, str) and key.startswith("RPM")
     } == pending_keys
     assert runner.find_completed_manifest_ids(checkpoint_dir, [task]) == {task.geom_id}
+
+
+def test_condition_checkpoint_filename_uses_full_digests(tmp_path):
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    key = runner.condition_key(*task.conditions[0][:3])
+
+    checkpoint = runner._condition_checkpoint_path(tmp_path, task, key)
+
+    condition_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    assert checkpoint.name == (
+        f"checkpoint_manifest-{task.manifest_sha256}_"
+        f"geometry-{task.geom_id}_{condition_digest}.pkl"
+    )
 
 
 def test_resume_unions_valid_condition_keys_across_multiple_pickles(tmp_path):
@@ -461,6 +502,28 @@ def test_resume_rejects_corrupt_mismatched_and_empty_checkpoints(tmp_path):
     assert completed == {task.geom_id: {valid_key}}
 
 
+@pytest.mark.parametrize("load_error", [ModuleNotFoundError, ImportError, TypeError])
+def test_resume_skips_any_pickle_deserialization_failure(
+    monkeypatch, tmp_path, load_error
+):
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    with (tmp_path / "valid.pkl").open("wb") as handle:
+        pickle.dump({f"geometry_{task.geom_id}": _stored_result(task)}, handle)
+    (tmp_path / "unloadable.pkl").write_bytes(b"placeholder")
+    real_pickle_load = pickle.load
+
+    def selectively_fail(handle):
+        if handle.name.endswith("unloadable.pkl"):
+            raise load_error("synthetic deserialization failure")
+        return real_pickle_load(handle)
+
+    monkeypatch.setattr(runner.pickle, "load", selectively_fail)
+
+    assert runner.find_completed_manifest_ids(tmp_path, [task]) == {task.geom_id}
+
+
 def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
     manifest = runner.load_manifest(
         _write_manifest(tmp_path, _manifest_payload(tuple(range(1000, 1005))))
@@ -487,6 +550,9 @@ def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
         lambda node, key: node.__setitem__(key, pd.DataFrame()),
         lambda node, key: node.__setitem__(key, {"not": "a dataframe"}),
         lambda node, key: node.__setitem__("generator_git_commit", ""),
+        lambda node, key: node.__setitem__("generator_git_commit", "unknown"),
+        lambda node, key: node.__setitem__("generator_git_commit", "a" * 39),
+        lambda node, key: node.__setitem__("generator_git_commit", "g" * 40),
         lambda node, key: node.pop("generator_git_commit"),
     ],
 )
