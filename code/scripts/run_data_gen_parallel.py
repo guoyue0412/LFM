@@ -43,7 +43,7 @@ import sys
 import time
 import traceback
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -53,7 +53,7 @@ LFM_ROOT = Path(__file__).resolve().parent.parent
 if str(LFM_ROOT) not in sys.path:
     sys.path.insert(0, str(LFM_ROOT))
 
-from optimization_v2.geometry import GEOMETRY_R, cp_to_sections
+from optimization_v2.geometry import GEOMETRY_R, cp_to_sections  # noqa: E402
 
 SUBMODULE_ROOT = LFM_ROOT / "Propeller_project-main"
 SUB_CODE_ROOT = SUBMODULE_ROOT / "code" / "Simulation_QBlade"
@@ -268,38 +268,57 @@ def _condition_split_map(task: ManifestTask) -> dict[str, str]:
     }
 
 
-def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
+def _valid_manifest_condition_keys(
+    node: object, task: ManifestTask
+) -> set[str]:
+    """Return valid declared condition keys from one exact manifest node."""
     if not isinstance(node, dict):
-        return False
+        return set()
     expected_splits = _condition_split_map(task)
     condition_keys = {key for key in node if isinstance(key, str) and key.startswith("RPM")}
     try:
         control_points = np.asarray(node["control_points"], dtype=np.float64)
+        sections = np.asarray(node["sections"], dtype=np.float64)
         geometry = np.asarray(node["geometry"], dtype=np.float64)
     except (KeyError, TypeError, ValueError):
-        return False
+        return set()
     generator_commit = node.get("generator_git_commit")
-    return (
+    split_map = node.get("condition_split")
+    metadata_valid = (
         node.get("geom_id") == task.geom_id
         and node.get("manifest_sha256") == task.manifest_sha256
         and node.get("category") == task.category
         and node.get("seed") == task.seed
-        and node.get("condition_split") == expected_splits
-        and condition_keys == set(expected_splits)
+        and isinstance(split_map, dict)
+        and set(split_map) == condition_keys
+        and condition_keys.issubset(expected_splits)
         and isinstance(generator_commit, str)
         and bool(generator_commit.strip())
-        and all(_is_nonempty_condition_frame(node.get(key)) for key in expected_splits)
         and np.array_equal(control_points, task.cp8)
+        and np.array_equal(sections, task.sections)
         and np.array_equal(geometry, task.geometry)
     )
+    if not metadata_valid:
+        return set()
+    return {
+        key
+        for key in condition_keys
+        if split_map[key] == expected_splits[key]
+        and _is_nonempty_condition_frame(node.get(key))
+    }
 
 
-def find_completed_manifest_ids(
+def _is_complete_manifest_node(node: object, task: ManifestTask) -> bool:
+    expected_keys = set(_condition_split_map(task))
+    return _valid_manifest_condition_keys(node, task) == expected_keys
+
+
+def find_completed_manifest_conditions(
     output_dir: str | Path, tasks: list[ManifestTask]
-) -> set[int]:
-    """Return IDs backed by at least one exact, complete manifest result node."""
+) -> dict[int, set[str]]:
+    """Union exact valid condition keys across checkpoint and aggregate pkls."""
     task_by_id = {task.geom_id: task for task in tasks}
-    completed: set[int] = set()
+    completed: dict[int, set[str]] = {}
     for path in sorted(Path(output_dir).glob("*.pkl")):
         try:
             with path.open("rb") as handle:
@@ -309,10 +328,24 @@ def find_completed_manifest_ids(
         if not isinstance(payload, dict):
             continue
         for geom_id, task in task_by_id.items():
-            node = payload.get(f"geometry_{geom_id}")
-            if _is_complete_manifest_node(node, task):
-                completed.add(geom_id)
+            valid_keys = _valid_manifest_condition_keys(
+                payload.get(f"geometry_{geom_id}"), task
+            )
+            if valid_keys:
+                completed.setdefault(geom_id, set()).update(valid_keys)
     return completed
+
+
+def find_completed_manifest_ids(
+    output_dir: str | Path, tasks: list[ManifestTask]
+) -> set[int]:
+    """Return IDs backed by at least one exact, complete manifest result node."""
+    condition_keys = find_completed_manifest_conditions(output_dir, tasks)
+    return {
+        task.geom_id
+        for task in tasks
+        if condition_keys.get(task.geom_id, set()) == set(_condition_split_map(task))
+    }
 
 
 def prepare_manifest_run(
@@ -324,8 +357,24 @@ def prepare_manifest_run(
     """Load, validate, subset, and resume-filter a manifest without QBlade imports."""
     manifest = load_manifest(manifest_path, expected_sha256=expected_sha256)
     selected = build_manifest_tasks(manifest, geom_ids=geom_ids)
-    completed = find_completed_manifest_ids(output_dir, selected)
-    pending = [task for task in selected if task.geom_id not in completed]
+    completed_conditions = find_completed_manifest_conditions(output_dir, selected)
+    completed = {
+        task.geom_id
+        for task in selected
+        if completed_conditions.get(task.geom_id, set())
+        == set(_condition_split_map(task))
+    }
+    pending = []
+    for task in selected:
+        if task.geom_id in completed:
+            continue
+        valid_keys = completed_conditions.get(task.geom_id, set())
+        missing = tuple(
+            condition
+            for condition in task.conditions
+            if condition_key(*condition[:3]) not in valid_keys
+        )
+        pending.append(replace(task, conditions=missing))
     return pending, completed, manifest.sha256
 
 
@@ -485,8 +534,67 @@ def _generator_git_commit() -> str:
         return "unknown"
 
 
+def _condition_checkpoint_path(
+    output_dir: str | Path, task: ManifestTask, key: str
+) -> Path:
+    """Return a deterministic filename for one manifest condition checkpoint."""
+    key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return Path(output_dir) / (
+        f"checkpoint_manifest-{task.manifest_sha256[:12]}_"
+        f"geometry-{task.geom_id}_{key_digest}.pkl"
+    )
+
+
+def _atomic_pickle_dump(payload: object, destination: Path) -> None:
+    """Persist one pickle using fsync + atomic rename in its destination directory."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        with temporary.open("wb") as handle:
+            pickle.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_condition_checkpoint(
+    output_dir: str | Path,
+    task: ManifestTask,
+    key: str,
+    split: str,
+    frame: pd.DataFrame,
+    generator_commit: str,
+) -> Path:
+    """Atomically persist one successful declared manifest condition."""
+    node = {
+        "geometry": task.geometry.copy(),
+        "sections": task.sections.copy(),
+        key: frame,
+        "geom_id": task.geom_id,
+        "category": task.category,
+        "control_points": task.cp8.tolist(),
+        "condition_split": {key: split},
+        "seed": task.seed,
+        "manifest_sha256": task.manifest_sha256,
+        "generator_git_commit": generator_commit,
+    }
+    destination = _condition_checkpoint_path(output_dir, task, key)
+    _atomic_pickle_dump({f"geometry_{task.geom_id}": node}, destination)
+    return destination
+
+
 def _worker_run_manifest(
-    manifest_task: ManifestTask, num_timesteps: int | None, device: str
+    manifest_task: ManifestTask,
+    num_timesteps: int | None,
+    device: str,
+    checkpoint_dir: str | Path | None = None,
 ) -> tuple[int, dict | None, str | None]:
     pid = os.getpid()
     t0 = time.time()
@@ -501,6 +609,7 @@ def _worker_run_manifest(
         sim.change_propeller_geometry(section_data=manifest_task.geometry)
         condition_results = {}
         split_map = {}
+        generator_commit = _generator_git_commit()
         for rpm, wind, angle, split in manifest_task.conditions:
             key = condition_key(rpm, wind, angle)
             sim.run_one_simulation(RPM=rpm, WIND_SPEED=wind, ANGLE=angle)
@@ -513,9 +622,19 @@ def _worker_run_manifest(
                 raise RuntimeError(f"empty QBlade result for {(rpm, wind, angle)}")
             condition_results[key] = frame
             split_map[key] = split
+            if checkpoint_dir is not None:
+                _write_condition_checkpoint(
+                    checkpoint_dir,
+                    manifest_task,
+                    key,
+                    split,
+                    frame,
+                    generator_commit,
+                )
 
         result = {
             "geometry": manifest_task.geometry.copy(),
+            "sections": manifest_task.sections.copy(),
             **condition_results,
             "geom_id": manifest_task.geom_id,
             "category": manifest_task.category,
@@ -523,7 +642,7 @@ def _worker_run_manifest(
             "condition_split": split_map,
             "seed": manifest_task.seed,
             "manifest_sha256": manifest_task.manifest_sha256,
-            "generator_git_commit": _generator_git_commit(),
+            "generator_git_commit": generator_commit,
         }
         elapsed = time.time() - t0
         print(
@@ -554,7 +673,7 @@ def worker_run(task: tuple) -> tuple:
 
     Pool.map 会自动分发 task 到空闲 worker。
     """
-    if len(task) == 3 and isinstance(task[0], ManifestTask):
+    if len(task) in (3, 4) and isinstance(task[0], ManifestTask):
         return _worker_run_manifest(*task)
 
     geom_idx, geom_array, num_timesteps, device = task
@@ -645,7 +764,8 @@ def main() -> int:
             print("✅ 所选 manifest 几何均已有完整且元数据匹配的输出")
             return 0
         tasks = [
-            (task, args.num_timesteps, args.device) for task in manifest_tasks
+            (task, args.num_timesteps, args.device, out_dir)
+            for task in manifest_tasks
         ]
     else:
         if args.geom_ids is not None or args.manifest_sha256 is not None:

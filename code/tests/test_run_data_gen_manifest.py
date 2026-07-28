@@ -321,13 +321,15 @@ def test_worker_close_error_does_not_override_success(monkeypatch, manifest_task
     assert CloseFailingSimulation.instances[-1].closed
 
 
-def _stored_result(task):
+def _stored_result(task, conditions=None):
+    conditions = task.conditions if conditions is None else tuple(conditions)
     condition_split = {
         runner.condition_key(rpm, wind, angle): split
-        for rpm, wind, angle, split in task.conditions
+        for rpm, wind, angle, split in conditions
     }
     return {
         "geometry": task.geometry,
+        "sections": task.sections,
         **{key: pd.DataFrame({"value": [1.0]}) for key in condition_split},
         "geom_id": task.geom_id,
         "category": task.category,
@@ -337,6 +339,126 @@ def _stored_result(task):
         "manifest_sha256": task.manifest_sha256,
         "generator_git_commit": "abc123",
     }
+
+
+class CrashAfterThreeSimulation(FakeSimulation):
+    def run_one_simulation(self, RPM, WIND_SPEED, ANGLE):
+        if len(self.calls) == 3:
+            raise RuntimeError("synthetic interruption")
+        return super().run_one_simulation(RPM, WIND_SPEED, ANGLE)
+
+
+def test_manifest_worker_checkpoints_partial_interruption_and_resumes_exact_keys(
+    monkeypatch, tmp_path
+):
+    manifest_path = _write_manifest(tmp_path, _manifest_payload())
+    task = runner.build_manifest_tasks(runner.load_manifest(manifest_path))[0]
+    checkpoint_dir = tmp_path / "checkpoints"
+    CrashAfterThreeSimulation.instances.clear()
+    CrashAfterThreeSimulation.empty_condition = None
+    CrashAfterThreeSimulation.omit_persisted_condition = None
+    monkeypatch.setattr(runner, "_SIMULATION", CrashAfterThreeSimulation, raising=False)
+    monkeypatch.setattr(runner, "_config", FakeConfig, raising=False)
+    monkeypatch.setattr(runner, "_generator_git_commit", lambda: "commit123")
+
+    geom_id, result, error = runner.worker_run(
+        (task, 1000, "CPU", checkpoint_dir)
+    )
+
+    assert geom_id == task.geom_id and result is None
+    assert "synthetic interruption" in error
+    expected_completed = {
+        runner.condition_key(*condition[:3]) for condition in task.conditions[:3]
+    }
+    assert runner.find_completed_manifest_conditions(checkpoint_dir, [task]) == {
+        task.geom_id: expected_completed
+    }
+    checkpoint_paths = sorted(checkpoint_dir.glob("*.pkl"))
+    assert len(checkpoint_paths) == 3
+    assert not list(checkpoint_dir.glob("*.tmp"))
+    with checkpoint_paths[0].open("rb") as handle:
+        node = pickle.load(handle)[f"geometry_{task.geom_id}"]
+    assert node["geom_id"] == task.geom_id
+    assert node["category"] == task.category
+    assert node["manifest_sha256"] == task.manifest_sha256
+    assert node["generator_git_commit"] == "commit123"
+    np.testing.assert_array_equal(node["control_points"], task.cp8)
+    np.testing.assert_array_equal(node["sections"], task.sections)
+    np.testing.assert_array_equal(node["geometry"], task.geometry)
+    assert len(node["condition_split"]) == 1
+
+    pending, completed_ids, _ = runner.prepare_manifest_run(
+        manifest_path=manifest_path,
+        geom_ids={task.geom_id},
+        expected_sha256=None,
+        output_dir=checkpoint_dir,
+    )
+    assert completed_ids == set()
+    assert len(pending) == 1
+    pending_keys = {
+        runner.condition_key(*condition[:3]) for condition in pending[0].conditions
+    }
+    all_keys = {
+        runner.condition_key(*condition[:3]) for condition in task.conditions
+    }
+    assert pending_keys == all_keys - expected_completed
+
+    FakeSimulation.instances.clear()
+    FakeSimulation.empty_condition = None
+    FakeSimulation.omit_persisted_condition = None
+    monkeypatch.setattr(runner, "_SIMULATION", FakeSimulation, raising=False)
+    resumed_geom_id, resumed_result, resumed_error = runner.worker_run(
+        (pending[0], 1000, "CPU", checkpoint_dir)
+    )
+    assert resumed_error is None and resumed_geom_id == task.geom_id
+    assert FakeSimulation.instances[-1].calls == [
+        condition[:3] for condition in pending[0].conditions
+    ]
+    assert {
+        key for key in resumed_result if isinstance(key, str) and key.startswith("RPM")
+    } == pending_keys
+    assert runner.find_completed_manifest_ids(checkpoint_dir, [task]) == {task.geom_id}
+
+
+def test_resume_unions_valid_condition_keys_across_multiple_pickles(tmp_path):
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    first = _stored_result(task, task.conditions[:30])
+    second = _stored_result(task, task.conditions[30:])
+    with (tmp_path / "aggregate_a.pkl").open("wb") as handle:
+        pickle.dump({f"geometry_{task.geom_id}": first}, handle)
+    with (tmp_path / "aggregate_b.pkl").open("wb") as handle:
+        pickle.dump({f"geometry_{task.geom_id}": second}, handle)
+
+    completed = runner.find_completed_manifest_conditions(tmp_path, [task])
+
+    expected_keys = {
+        runner.condition_key(*condition[:3]) for condition in task.conditions
+    }
+    assert completed == {task.geom_id: expected_keys}
+    assert runner.find_completed_manifest_ids(tmp_path, [task]) == {task.geom_id}
+
+
+def test_resume_rejects_corrupt_mismatched_and_empty_checkpoints(tmp_path):
+    task = runner.build_manifest_tasks(
+        runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))
+    )[0]
+    valid = _stored_result(task, task.conditions[:1])
+    mismatch = _stored_result(task, task.conditions[1:2])
+    mismatch["manifest_sha256"] = "f" * 64
+    empty = _stored_result(task, task.conditions[2:3])
+    empty_key = runner.condition_key(*task.conditions[2][:3])
+    empty[empty_key] = pd.DataFrame()
+    for name, node in (("valid.pkl", valid), ("mismatch.pkl", mismatch), ("empty.pkl", empty)):
+        with (tmp_path / name).open("wb") as handle:
+            pickle.dump({f"geometry_{task.geom_id}": node}, handle)
+    (tmp_path / "corrupt.pkl").write_bytes(b"not a pickle")
+
+    completed = runner.find_completed_manifest_conditions(tmp_path, [task])
+
+    valid_key = runner.condition_key(*task.conditions[0][:3])
+    assert completed == {task.geom_id: {valid_key}}
 
 
 def test_resume_skips_only_exact_complete_manifest_nodes(tmp_path):
