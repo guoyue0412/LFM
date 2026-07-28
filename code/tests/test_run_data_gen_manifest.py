@@ -707,6 +707,22 @@ def test_manifest_cli_arguments_and_exact_id_parser(monkeypatch):
         runner.parse_geom_ids("1000,nope")
 
 
+def test_gpu_cli_is_single_worker_only(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["runner", "--device", "GPU", "--workers", "1"],
+    )
+    args = runner.parse_args()
+
+    runner.validate_runtime_args(args)
+    assert args.device == "GPU"
+
+    args.workers = 2
+    with pytest.raises(ValueError, match="GPU.*exactly one worker"):
+        runner.validate_runtime_args(args)
+
+
 def test_condition_selector_parsers_and_mutual_exclusion(monkeypatch, tmp_path):
     task = runner.build_manifest_tasks(
         runner.load_manifest(_write_manifest(tmp_path, _manifest_payload()))

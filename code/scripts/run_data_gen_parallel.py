@@ -9,7 +9,8 @@
     3. code/、QBladeCE_2.0.8.6/ 符号链接共享（只读）
     4. chdir 到 <work>/code/Simulation_QBlade（config.py 用 os.getcwd() 解析）
 - 任务粒度：1 个几何 = 1 个 task；几何数 > workers 时排队。
-- QBlade GPU 路径在 propeller 工况下死锁/崩溃（见 RESEARCH_LOG #11），强制走 CPU(d0)。
+- QBlade GPU 路径仅允许单 worker 串行运行；多 GPU/多进程路径曾出现
+  CL_INVALID_DEVICE 或挂起（见 RESEARCH_LOG 与 TECHNICAL_REFERENCE）。
 
 输出格式与单进程版完全一致：
     {f'geometry_{idx}': {'geometry': np.ndarray, 'RPM*_Wind*_Angle*': pd.DataFrame, ...}}
@@ -542,8 +543,8 @@ def parse_args() -> argparse.Namespace:
                    help="每 worker 内部 OMP/MKL/BLAS 线程数；默认 8。"
                         "workers × omp-threads 应 ≤ 物理核心数；"
                         "node6 (160 核) 推荐 16×8=128，留 32 核给系统/QBlade Qt helper")
-    p.add_argument("--device", choices=["CPU"], default="CPU",
-                   help="强制 CPU 模式（GPU 路径在 propeller 工况下 hang，详见 RESEARCH_LOG #11）")
+    p.add_argument("--device", choices=["CPU", "GPU"], default="CPU",
+                   help="GPU 使用 OpenCL device_id=1，且仅允许单 worker 串行运行")
     p.add_argument("--geometry-npy", type=str, default=None,
                    help="形状 (N, 22, 3) 的几何 numpy 文件；省略则只跑 baseline 1 个几何")
     p.add_argument("--manifest", type=str, default=None,
@@ -585,6 +586,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--keep-worktree", action="store_true",
                    help="跑完不删 /tmp/lfm_w<pid>，便于调试")
     return p.parse_args()
+
+
+def validate_runtime_args(args: argparse.Namespace) -> None:
+    """Reject execution modes known to be unsafe before importing QBlade."""
+    if args.device == "GPU" and args.workers != 1:
+        raise ValueError("GPU execution requires exactly one worker")
 
 
 def setup_worker_workdir(worktree_root: str) -> Path:
@@ -934,6 +941,10 @@ def cleanup_worktrees(worktree_root: str, keep: bool) -> None:
 
 def main() -> int:
     args = parse_args()
+    try:
+        validate_runtime_args(args)
+    except ValueError as error:
+        sys.exit(f"✖ invalid runtime configuration: {error}")
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_digest: str | None = None
