@@ -108,6 +108,10 @@ def test_supplement_launcher_has_valid_shell_syntax_and_no_training_entrypoint()
     assert "sweep_moe" not in source
     assert 'WORKERS="${WORKERS:-1}"' in source
     assert 'OMP_THREADS="${OMP_THREADS:-4}"' in source
+    assert (
+        'EXPECTED_SUBMODULE_COMMIT="${EXPECTED_SUBMODULE_COMMIT:-'
+        'f3e56740b83aa00a36f4d56380b095c5b741437f}"'
+    ) in source
 
 
 @pytest.mark.parametrize(
