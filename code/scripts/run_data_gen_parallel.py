@@ -9,8 +9,8 @@
     3. code/、QBladeCE_2.0.8.6/ 符号链接共享（只读）
     4. chdir 到 <work>/code/Simulation_QBlade（config.py 用 os.getcwd() 解析）
 - 任务粒度：1 个几何 = 1 个 task；几何数 > workers 时排队。
-- QBlade GPU 路径仅允许单 worker 串行运行；多 GPU/多进程路径曾出现
-  CL_INVALID_DEVICE 或挂起（见 RESEARCH_LOG 与 TECHNICAL_REFERENCE）。
+- QBlade GPU 路径仅允许主进程单 worker 串行运行；fork 子进程初始化
+  OpenCL 会挂起（见 RESEARCH_LOG 与 TECHNICAL_REFERENCE）。
 
 输出格式与单进程版完全一致：
     {f'geometry_{idx}': {'geometry': np.ndarray, 'RPM*_Wind*_Angle*': pd.DataFrame, ...}}
@@ -631,9 +631,9 @@ def setup_worker_workdir(worktree_root: str) -> Path:
 
 
 def worker_init(worktree_root: str, omp_threads: int) -> None:
-    """Pool worker 启动钩子：建工作目录、chdir、注入 sys.path、import 子模块。
+    """执行 worker 启动钩子：建工作目录、chdir、注入 sys.path、import 子模块。
 
-    在 fork 子进程中执行（每个 worker 进程仅一次）。
+    CPU 路径在每个 fork 子进程中执行一次；GPU 路径在主进程执行一次。
 
     限制每 worker 内部并行度（OMP/BLAS/MKL），避免多 worker × 多线程
     在 N 核机器上 over-subscription：实测 4 worker × 32 OMP 线程
@@ -1036,10 +1036,6 @@ def main() -> int:
     print(f"▸ 工作目录父级: {args.worktree_root}/lfm_w<pid>/")
     print(f"▸ submodule: {SUBMODULE_ROOT}")
 
-    # 用 fork 上下文（子进程继承 LD_LIBRARY_PATH 与 sys.path）
-    # spawn 也可以但启动慢、需要重新 import；fork 在 Linux 上更高效
-    ctx = mp.get_context("fork")
-
     t_start = time.time()
     aggregated: dict[str, dict] = {}   # 当前 batch 缓冲
     all_failed: list[tuple] = []
@@ -1065,25 +1061,42 @@ def main() -> int:
         aggregated = {}
         n_batches_written += 1
 
+    def collect_results(results) -> None:
+        """Aggregate worker outcomes, preserving checkpoint and batch semantics."""
+        nonlocal n_done_total
+        for geom_idx, result, err in results:
+            if result is not None:
+                aggregated[f"geometry_{geom_idx}"] = result
+            else:
+                all_failed.append((geom_idx, err))
+            n_done_total += 1
+            print(f"  进度: {n_done_total}/{n_geoms} "
+                  f"(成功 {n_done_total - len(all_failed)}, "
+                  f"失败 {len(all_failed)})", flush=True)
+            # 分批落盘：避免崩了丢全部
+            if args.batch_size > 0 and len(aggregated) >= args.batch_size:
+                flush_batch()
+
+    original_cwd = os.getcwd()
     try:
-        with ctx.Pool(processes=n_workers,
-                      initializer=worker_init,
-                      initargs=(args.worktree_root, args.omp_threads)) as pool:
-            for (geom_idx, result, err) in pool.imap_unordered(worker_run, tasks):
-                if result is not None:
-                    aggregated[f"geometry_{geom_idx}"] = result
-                else:
-                    all_failed.append((geom_idx, err))
-                n_done_total += 1
-                print(f"  进度: {n_done_total}/{n_geoms} "
-                      f"(成功 {n_done_total - len(all_failed)}, "
-                      f"失败 {len(all_failed)})", flush=True)
-                # 分批落盘：避免崩了丢全部
-                if args.batch_size > 0 and len(aggregated) >= args.batch_size:
-                    flush_batch()
+        if args.device == "GPU":
+            # QBlade's OpenCL context works in this process but can hang after fork.
+            # Reuse the regular worker initializer and task function so the manifest,
+            # per-condition checkpoints, provenance, batching, and failures stay exact.
+            worker_init(args.worktree_root, args.omp_threads)
+            collect_results(worker_run(task) for task in tasks)
+        else:
+            # fork preserves LD_LIBRARY_PATH and sys.path; it is the established CPU path.
+            ctx = mp.get_context("fork")
+            with ctx.Pool(processes=n_workers,
+                          initializer=worker_init,
+                          initargs=(args.worktree_root, args.omp_threads)) as pool:
+                collect_results(pool.imap_unordered(worker_run, tasks))
         # 收尾：把剩余的也落盘
         flush_batch()
     finally:
+        if args.device == "GPU":
+            os.chdir(original_cwd)
         cleanup_worktrees(args.worktree_root, args.keep_worktree)
 
     total = time.time() - t_start

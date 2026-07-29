@@ -1,3 +1,4 @@
+import argparse
 import copy
 import hashlib
 import json
@@ -5,6 +6,7 @@ import os
 import pickle
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -721,6 +723,69 @@ def test_gpu_cli_is_single_worker_only(monkeypatch):
     args.workers = 2
     with pytest.raises(ValueError, match="GPU.*exactly one worker"):
         runner.validate_runtime_args(args)
+
+
+def test_gpu_main_runs_tasks_in_current_process_without_multiprocessing_pool(
+    monkeypatch, tmp_path
+):
+    original_cwd = os.getcwd()
+    work_cwd = tmp_path / "gpu-workdir"
+    work_cwd.mkdir()
+    manifest_tasks = [object(), object()]
+    args = argparse.Namespace(
+        device="GPU",
+        workers=1,
+        omp_threads=32,
+        out_dir=str(tmp_path / "output"),
+        manifest="manifest.json",
+        geometry_npy=None,
+        first_n_geoms=None,
+        start_idx=0,
+        end_idx=None,
+        geom_ids=None,
+        manifest_sha256=None,
+        condition_splits=None,
+        condition_keys=None,
+        num_timesteps=1000,
+        batch_size=1,
+        tag="gpu-direct",
+        worktree_root=str(tmp_path),
+        keep_worktree=False,
+    )
+    initialized = []
+    executed = []
+
+    monkeypatch.setattr(runner, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        runner,
+        "prepare_manifest_run",
+        lambda **kwargs: (manifest_tasks, set(), "a" * 64),
+    )
+
+    def fake_worker_init(worktree_root, omp_threads):
+        initialized.append((worktree_root, omp_threads))
+        os.chdir(work_cwd)
+
+    def fake_worker_run(task):
+        executed.append(task)
+        return (len(executed), {"result": len(executed)}, None)
+
+    def reject_multiprocessing(*args, **kwargs):
+        raise AssertionError("GPU execution must not construct a multiprocessing Pool")
+
+    monkeypatch.setattr(runner, "worker_init", fake_worker_init)
+    monkeypatch.setattr(runner, "worker_run", fake_worker_run)
+    monkeypatch.setattr(runner.mp, "get_context", reject_multiprocessing)
+    monkeypatch.setattr(runner, "cleanup_worktrees", lambda *args: None)
+
+    assert runner.main() == 0
+    assert initialized == [(args.worktree_root, args.omp_threads)]
+    assert executed == [
+        (manifest_tasks[0], args.num_timesteps, args.device, Path(args.out_dir)),
+        (manifest_tasks[1], args.num_timesteps, args.device, Path(args.out_dir)),
+    ]
+    assert os.getcwd() == original_cwd
+    assert len(list(Path(args.out_dir).glob("*.pkl"))) == 2
 
 
 def test_condition_selector_parsers_and_mutual_exclusion(monkeypatch, tmp_path):
